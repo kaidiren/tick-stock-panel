@@ -72,6 +72,24 @@ def _code_of_symbol(symbol: str) -> str:
     return symbol.split(".")[0]
 
 
+def _strip_tz(dt: datetime | None) -> datetime | None:
+    """把 tz-aware datetime 转成 Asia/Shanghai 墙钟 naive(供与 naive 分钟 datetime 比较)。
+
+    A 股窗口(如 CN_TZ 北京时间)传进来是 tz-aware, 与新归一化的 naive 分钟
+    datetime 直接 is_between 会抛 polars SchemaError(naive vs tz-aware)。
+    这里转 Asia/Shanghai 后去时区, 得到与 _minute_frame 一致的墙钟 naive。
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        try:
+            from zoneinfo import ZoneInfo
+            return dt.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+        except Exception:  # noqa: BLE001
+            return dt.replace(tzinfo=None)
+    return dt
+
+
 def _to_app_symbol(code: str, market: int) -> str:
     """code + market → app symbol(600519.SH)。"""
     suffix = {1: "SH", 0: "SZ", 2: "BJ"}.get(int(market), "")
@@ -275,7 +293,11 @@ class EasyTdxProvider:
                     continue
                 frame = _minute_frame(df, sym)
                 if (start_time is not None and end_time is not None):
-                    frame = frame.filter(pl.col("datetime").is_between(start_time, end_time))
+                    # start/end 可能是 tz-aware(如 CN_TZ 北京时间), 而 frame.datetime 是 naive
+                    # 北京墙钟 — 类型不一致会导致 polars is_between 抛 SchemaError, 剥时区后再比较。
+                    win_start = _strip_tz(start_time)
+                    win_end = _strip_tz(end_time)
+                    frame = frame.filter(pl.col("datetime").is_between(win_start, win_end))
                 if not frame.is_empty():
                     frames.append(frame)
                 if on_chunk_done:

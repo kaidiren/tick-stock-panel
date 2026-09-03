@@ -89,6 +89,40 @@ def test_minute_frame_empty_returns_empty():
     assert _minute_frame(pl.DataFrame(), "600519.SH").is_empty()
 
 
+def test_get_minute_accepts_tz_aware_window(monkeypatch):
+    """回归: get_minute 收到 tz-aware 窗口(如 fetch_minute_single 传 CN_TZ 北京时间)
+    不得抛 SchemaError(naive datetime vs tz-aware 比较), 且按北京墙钟正确过滤。
+
+    曾因 start/end 是 tz-aware 而 frame.datetime 是 naive, polars is_between 抛
+    SchemaError → _try_custom_minute 捕获 → 回退 TickFlow → 免费服务报"不支持K线"。
+    """
+    p = EasyTdxProvider()
+
+    class FakeMac:
+        def get_stock_kline(self, mkt, code, period, start=0, count=800, times=1, adjust=None):
+            import pandas as pd
+            # 返回北京墙钟 naive 分钟(09:31 交易时段 + 11:40 午休)
+            return pd.DataFrame({
+                "datetime": pd.to_datetime([
+                    "2026-09-03 09:31:00", "2026-09-03 09:32:00", "2026-09-03 11:40:00",
+                ]),
+                "open": [3.6, 3.61, 3.6], "high": [3.62, 3.62, 3.61],
+                "low": [3.59, 3.6, 3.59], "close": [3.61, 3.6, 3.6],
+                "vol": [100, 200, 300], "amount": [360.0, 720.0, 1080.0],
+            })
+
+    monkeypatch.setattr(p, "_open_mac", lambda: _ctx(FakeMac()))
+    # CN_TZ 北京时间 tz-aware 窗口 (09:25 ~ 11:30)
+    from app.market_time import CN_TZ
+    start = dt.datetime(2026, 9, 3, 9, 25, 0, tzinfo=CN_TZ)
+    end = dt.datetime(2026, 9, 3, 11, 30, 0, tzinfo=CN_TZ)
+    df = p.get_minute(["601778.SH"], start, end, "stock", "1m")
+    # 09:31/09:32 在窗口内, 11:40 午休在窗口外
+    assert df.height == 2
+    times = [t.strftime("%H:%M") for t in df["datetime"].to_list()]
+    assert times == ["09:31:00", "09:32:00"] or times == ["09:31", "09:32"]
+
+
 # ---------- depth5 归一化 ----------
 
 def test_get_depth5_batch_maps_bid_ask_volumes(monkeypatch):
