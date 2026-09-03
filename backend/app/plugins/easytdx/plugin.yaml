@@ -1,0 +1,16 @@
+# easy-tdx 内置可选数据源插件
+# ⚠️ 合规提示: 本插件通过通达信行情服务器协议直连抓取行情数据, 未经交易所/行情商
+#    正式授权, 可能违反其服务条款并涉及行情版权问题。Docker 默认不打包(INCLUDE_EASYTDX=0);
+#    启用即视为使用者知悉并自行承担合规责任。开发模式需安装依赖:
+#    cd backend/app/plugins/easytdx && uv pip install -r requirements.txt (或 pip install -r requirements.txt)
+
+name: easytdx
+display_name: "easy-tdx"
+runtime: python
+entry: app.plugins.easytdx.provider:EasyTdxProvider
+check: app.plugins.easytdx.provider:availability
+datasets: [daily, adj_factor, realtime, minute, full_minute, depth5]
+api_key_env: ""            # 无需 API Key; 空串则不显示 Key 输入框
+description: "通达信协议直连(免费、免Key、免注册)。日K/除权/实时全市场/分钟K/当日分时/全量分钟/五档盘口。需运行环境可连通通达信行情服务器; Docker 默认不打包。"
+install_hint: "Docker 需 --build-arg INCLUDE_EASYTDX=1 才打包;开发模式: cd backend/app/plugins/easytdx && pip install -r requirements.txt"
+homepage: "https://github.com/handsomejustin/easy_tdx"
