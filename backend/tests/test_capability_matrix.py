@@ -274,3 +274,36 @@ def test_full_minute_routable_like_other_capabilities(monkeypatch):
     fm_default = caps_pro_default["full_minute"]
     assert [c["name"] for c in fm_default["candidates"]] == ["myfm"]
     assert fm_default["usable"] is False
+
+
+def test_settings_capability_matrix_injects_full_minute_pref(monkeypatch):
+    """回归: get_capability_matrix 接口必须注入 full_minute_data_provider 偏好。
+
+    build_capability_matrix 的 current dict 曾漏传 full_minute_data_provider,
+    导致无论偏好如何设置, full_minute 的 current/effective 都回落默认 tickflow,
+    前端全量分钟卡片恒显示「能力不可用」(即使已路由到 easytdx 等插件)。
+    本测试 mock 偏好 getter, 断言接口返回的矩阵 current 能正确反映 full_minute 偏好。
+    """
+    from app.api import settings as settings_api
+    from app.tickflow import policy
+
+    # mock 全部偏好 getter (避免读真实 preferences.json)
+    monkeypatch.setattr("app.services.preferences.get_daily_data_provider", lambda: "fuyao")
+    monkeypatch.setattr("app.services.preferences.get_adj_factor_provider", lambda: "fuyao")
+    monkeypatch.setattr("app.services.preferences.get_minute_data_provider", lambda: "stocksdk")
+    monkeypatch.setattr("app.services.preferences.get_realtime_data_provider", lambda: "fuyao")
+    monkeypatch.setattr("app.services.preferences.get_financial_provider", lambda: "fuyao")
+    monkeypatch.setattr("app.services.preferences.get_depth5_data_provider", lambda: "stocksdk")
+    monkeypatch.setattr("app.services.preferences.get_full_minute_data_provider", lambda: "easytdx")
+    monkeypatch.setattr(policy, "base_tier_name", lambda: "none")
+
+    matrix = settings_api.get_capability_matrix()
+    byid = {c["id"]: c for c in matrix["capabilities"]}
+
+    # 各能力 current 必须反映注入的偏好, 而不是回落默认 tickflow
+    assert byid["full_minute"]["current"] == "easytdx"
+    assert byid["full_minute"]["effective"] == "easytdx"
+    assert byid["full_minute"]["field"] == "full_minute_data_provider"
+    # 其他能力也应收到对应偏好(防止同类漏传)
+    assert byid["minute"]["current"] == "stocksdk"
+    assert byid["depth5"]["current"] == "stocksdk"

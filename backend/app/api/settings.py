@@ -590,6 +590,7 @@ def get_capability_matrix() -> dict:
             "depth5_data_provider": preferences.get_depth5_data_provider(),
             "adj_factor_provider": preferences.get_adj_factor_provider(),
             "financial_data_provider": preferences.get_financial_provider(),
+            "full_minute_data_provider": preferences.get_full_minute_data_provider(),
         },
         tickflow_tier=policy.base_tier_name(),
     )
