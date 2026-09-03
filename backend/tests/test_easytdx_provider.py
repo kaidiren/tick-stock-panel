@@ -1,15 +1,36 @@
 """easy-tdx provider 契约测试。
 
-不依赖真实通达信连接: mock EasyTdxProvider._get_client/_get_mac_client 返回 pandas
+不依赖真实通达信连接: mock EasyTdxProvider._open_client/_open_mac 返回 pandas
 DataFrame 样例, 只验证 Python 侧归一化(符号映射/单位/契约列/空值/异常降级)与数据集声明。
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 
 import polars as pl
 
 from app.plugins.easytdx.provider import EasyTdxProvider
+
+
+def _ctx(obj):
+    """把 fake client 对象包装成 contextmanager, 供 _open_client/_open_mac(with 用法) mock。"""
+    @contextlib.contextmanager
+    def _cm():
+        yield obj
+    return _cm()
+
+
+class _Thrower:
+    """任意方法调用即抛指定异常, 模拟 client 连接/请求失败。"""
+    def __init__(self, msg):
+        self._msg = msg
+
+    def __getattr__(self, name):
+        def _f(*a, **k):
+            raise RuntimeError(self._msg)
+        return _f
+
 
 # ---------- 符号映射 ----------
 
@@ -87,7 +108,7 @@ def test_get_depth5_batch_maps_bid_ask_volumes(monkeypatch):
                 "ask5": 1297.66, "ask_vol5": 2,
             }])
 
-    monkeypatch.setattr(p, "_get_client", lambda: FakeClient())
+    monkeypatch.setattr(p, "_open_client", lambda: _ctx(FakeClient()))
     out = p.get_depth5_batch(["600519.SH"])
     assert out["600519.SH"]["ask_volumes"] == [3.0, 2.0, 1.0, 1.0, 2.0]
     assert out["600519.SH"]["bid_volumes"] == [7.0, 8.0, 1.0, 1.0, 1.0]
@@ -100,7 +121,7 @@ def test_get_depth5_batch_empty_symbols(monkeypatch):
 
 def test_get_depth5_batch_exception_degrades_to_empty(monkeypatch):
     p = EasyTdxProvider()
-    monkeypatch.setattr(p, "_get_client", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(p, "_open_client", lambda: _ctx(_Thrower("boom")))
     assert p.get_depth5_batch(["600519.SH"]) == {}
 
 
@@ -118,7 +139,7 @@ def test_get_realtime_normalizes_units(monkeypatch):
                 "high": 1303.0, "low": 1291.2, "vol": 20308, "amount": 2634084352.0,
             }])
 
-    monkeypatch.setattr(p, "_get_client", lambda: FakeClient())
+    monkeypatch.setattr(p, "_open_client", lambda: _ctx(FakeClient()))
     out = p.get_realtime(symbols=["600519.SH"])
     assert out[0]["symbol"] == "600519.SH"
     assert out[0]["last_price"] == 1297.5
@@ -129,7 +150,7 @@ def test_get_realtime_normalizes_units(monkeypatch):
 
 def test_get_realtime_empty_and_exception(monkeypatch):
     p = EasyTdxProvider()
-    monkeypatch.setattr(p, "_get_client", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(p, "_open_client", lambda: _ctx(_Thrower("boom")))
     assert p.get_realtime(symbols=["600519.SH"]) == []
 
 
@@ -149,7 +170,7 @@ def test_get_daily_normalizes(monkeypatch):
                 "vol": [3266402, 2030845], "amount": [4242440960.0, 2634084352.0],
             })
 
-    monkeypatch.setattr(p, "_get_client", lambda: FakeClient())
+    monkeypatch.setattr(p, "_open_client", lambda: _ctx(FakeClient()))
     df = p.get_daily(["600519.SH"], None, None)
     assert df.columns == ["symbol", "date", "open", "high", "low", "close", "volume", "amount"]
     assert df.height == 2
@@ -172,7 +193,7 @@ def test_get_adj_factors_ratio(monkeypatch):
             close = [10.0, 10.0] if adjust == 0 else [10.0, 20.0]
             return pd.DataFrame({"datetime": pd.to_datetime(dates), "close": close})
 
-    monkeypatch.setattr(p, "_get_mac_client", lambda: FakeMac())
+    monkeypatch.setattr(p, "_open_mac", lambda: _ctx(FakeMac()))
     df = p.get_adj_factors(["600519.SH"], None, None)
     assert df.columns == ["symbol", "trade_date", "ex_factor"]
     assert df.height == 2

@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -88,24 +89,36 @@ class EasyTdxProvider:
         self._client = None
 
     def close(self) -> None:  # loader.load_all 会对每个 provider 调 close
-        import contextlib
         c, self._client = self._client, None
         if c is not None:
             with contextlib.suppress(Exception):
                 c.close()
 
     # ---- 客户端惰性初始化 ----
-    def _get_client(self):
-        """返回唯一的 TdxClient(标准协议: 五档/日K/除权/标的列表)。懒加载。"""
-        if self._client is None:
-            from easy_tdx import TdxClient
-            self._client = TdxClient.from_best_host()
-        return self._client
+    @contextlib.contextmanager
+    def _open_client(self):
+        """标准协议 TdxClient 连接(每次新建, 用后即关)。
 
-    def _get_mac_client(self):
-        """返回 MacClient(MAC 协议: 分钟K/分时/全市场报价)。懒加载(独立连接)。"""
+        with TdxClient.from_best_host() as c: 比惰性复用连接更稳定 —— 复用同一连接
+        长时间易断/超时, 每次新建并 on-demand 取 best host, 保证 quota(五档/日K/标的)
+        类接口稳定返回。
+        """
+        from easy_tdx import TdxClient
+        c = TdxClient.from_best_host()
+        try:
+            yield c
+        finally:
+            c.close()
+
+    @contextlib.contextmanager
+    def _open_mac(self):
+        """MAC 协议 MacClient 连接(每次新建, 用后即关), 见 _open_client 说明。"""
         from easy_tdx.mac.client import MacClient
-        return MacClient.from_best_host()
+        c = MacClient.from_best_host()
+        try:
+            yield c
+        finally:
+            c.close()
 
     # ---- availability(探活) ----
     def _ping(self) -> bool:
@@ -134,20 +147,20 @@ class EasyTdxProvider:
         total = len(symbols)
         for i, sym in enumerate(symbols):
             try:
-                c = self._get_client()
-                # get_security_bars 单次 count 上限 800 (更大返回空), 超出按 800 分批拉取
-                for start in range(0, _DAILY_MAX_BARS, _DAILY_PAGE):
-                    bars = c.get_security_bars(
-                        _market_of_symbol(sym), _code_of_symbol(sym),
-                        KlineCategory.DAY, start, _DAILY_PAGE,
-                    )
-                    if bars is None or len(bars) == 0:
-                        break
-                    df = normalize_daily(bars.to_dict(orient="records"), default_symbol=sym, source=self.name)
-                    if not df.is_empty():
-                        frames.append(df)
-                    if len(bars) < _DAILY_PAGE:
-                        break
+                with self._open_client() as c:
+                    # get_security_bars 单次 count 上限 800 (更大返回空), 超出按 800 分批拉取
+                    for start in range(0, _DAILY_MAX_BARS, _DAILY_PAGE):
+                        bars = c.get_security_bars(
+                            _market_of_symbol(sym), _code_of_symbol(sym),
+                            KlineCategory.DAY, start, _DAILY_PAGE,
+                        )
+                        if bars is None or len(bars) == 0:
+                            break
+                        df = normalize_daily(bars.to_dict(orient="records"), default_symbol=sym, source=self.name)
+                        if not df.is_empty():
+                            frames.append(df)
+                        if len(bars) < _DAILY_PAGE:
+                            break
             except Exception as e:
                 logger.debug("easy-tdx daily 拉取失败(%s): %s", sym, e)
                 continue
@@ -182,35 +195,35 @@ class EasyTdxProvider:
 
         flat: list[dict] = []
         total = len(symbols)
-        mac = self._get_mac_client()
-        for i, sym in enumerate(symbols):
-            try:
-                none_df = mac.get_stock_kline(
-                    _market_of_symbol(sym), _code_of_symbol(sym), Period.DAILY,
-                    0, _DAILY_PAGE, 1, Adjust.NONE,
-                )
-                hfq_df = mac.get_stock_kline(
-                    _market_of_symbol(sym), _code_of_symbol(sym), Period.DAILY,
-                    0, _DAILY_PAGE, 1, Adjust.HFQ,
-                )
-                if (none_df is None or len(none_df) == 0) or (hfq_df is None or len(hfq_df) == 0):
+        with self._open_mac() as mac:
+            for i, sym in enumerate(symbols):
+                try:
+                    none_df = mac.get_stock_kline(
+                        _market_of_symbol(sym), _code_of_symbol(sym), Period.DAILY,
+                        0, _DAILY_PAGE, 1, Adjust.NONE,
+                    )
+                    hfq_df = mac.get_stock_kline(
+                        _market_of_symbol(sym), _code_of_symbol(sym), Period.DAILY,
+                        0, _DAILY_PAGE, 1, Adjust.HFQ,
+                    )
+                    if (none_df is None or len(none_df) == 0) or (hfq_df is None or len(hfq_df) == 0):
+                        continue
+                    # MAC 协议日K时间列名为 datetime(Timestamp), 取日期部分对齐
+                    none_by = dict(zip(none_df["datetime"].astype(str).str[:10], none_df["close"], strict=False))
+                    hfq_by = dict(zip(hfq_df["datetime"].astype(str).str[:10], hfq_df["close"], strict=False))
+                    for d, hfq_c in hfq_by.items():
+                        none_c = none_by.get(d)
+                        if none_c and hfq_c:
+                            flat.append({
+                                "symbol": sym,
+                                "trade_date": date.fromisoformat(d),
+                                "ex_factor": float(hfq_c) / float(none_c),
+                            })
+                except Exception as e:
+                    logger.debug("easy-tdx adj 拉取失败(%s): %s", sym, e)
                     continue
-                # MAC 协议日K时间列名为 datetime(Timestamp), 取日期部分对齐
-                none_by = dict(zip(none_df["datetime"].astype(str).str[:10], none_df["close"], strict=False))
-                hfq_by = dict(zip(hfq_df["datetime"].astype(str).str[:10], hfq_df["close"], strict=False))
-                for d, hfq_c in hfq_by.items():
-                    none_c = none_by.get(d)
-                    if none_c and hfq_c:
-                        flat.append({
-                            "symbol": sym,
-                            "trade_date": date.fromisoformat(d),
-                            "ex_factor": float(hfq_c) / float(none_c),
-                        })
-            except Exception as e:
-                logger.debug("easy-tdx adj 拉取失败(%s): %s", sym, e)
-                continue
-            if on_chunk_done:
-                on_chunk_done(i + 1, total)
+                if on_chunk_done:
+                    on_chunk_done(i + 1, total)
         if not flat:
             return pl.DataFrame()
         df = normalize_adj_factors(flat, source=self.name)
@@ -222,13 +235,14 @@ class EasyTdxProvider:
     def get_realtime(self, universes: list[str] | None = None, symbols: list[str] | None = None) -> list[dict]:
         """实时快照 → list[dict] record。通配符: 无 symbols 时取全市场(分页)。"""
         try:
-            c = self._get_client()
             if symbols:
-                pairs = [(_market_of_symbol(s), _code_of_symbol(s)) for s in symbols]
-                df = c.get_security_quotes(pairs)
+                with self._open_client() as c:
+                    pairs = [(_market_of_symbol(s), _code_of_symbol(s)) for s in symbols]
+                    df = c.get_security_quotes(pairs)
             else:
-                # 全市场: 标志位不传会自动取全市场? easy-tdx 需要显式, 这里走分页报价列表兜底
-                df = self._get_mac_client().get_stock_quotes_list(__import__("easy_tdx").Category.A, count=6000)
+                # 全市场: 无 symbols 时用全市场报价列表一次拉取
+                with self._open_mac() as mac:
+                    df = mac.get_stock_quotes_list(__import__("easy_tdx").Category.A, count=6000)
             rows = _normalize_realtime(df)
             return rows
         except Exception as e:
@@ -249,23 +263,23 @@ class EasyTdxProvider:
             return pl.DataFrame()
         period = _period_from_freq(freq)
         frames: list[pl.DataFrame] = []
-        mac = self._get_mac_client()
         total = len(symbols)
-        for i, sym in enumerate(symbols):
-            try:
-                df = mac.get_stock_kline(_market_of_symbol(sym), _code_of_symbol(sym), period, count=300)
-            except Exception as e:
-                logger.debug("easy-tdx minute 拉取失败(%s): %s", sym, e)
-                continue
-            if df is None or len(df) == 0:
-                continue
-            frame = _minute_frame(df, sym)
-            if (start_time is not None and end_time is not None):
-                frame = frame.filter(pl.col("datetime").is_between(start_time, end_time))
-            if not frame.is_empty():
-                frames.append(frame)
-            if on_chunk_done:
-                on_chunk_done(i + 1, total)
+        with self._open_mac() as mac:
+            for i, sym in enumerate(symbols):
+                try:
+                    df = mac.get_stock_kline(_market_of_symbol(sym), _code_of_symbol(sym), period, count=300)
+                except Exception as e:
+                    logger.debug("easy-tdx minute 拉取失败(%s): %s", sym, e)
+                    continue
+                if df is None or len(df) == 0:
+                    continue
+                frame = _minute_frame(df, sym)
+                if (start_time is not None and end_time is not None):
+                    frame = frame.filter(pl.col("datetime").is_between(start_time, end_time))
+                if not frame.is_empty():
+                    frames.append(frame)
+                if on_chunk_done:
+                    on_chunk_done(i + 1, total)
         return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
     # ---- full_minute (修复轮: 当日窗口批量) ----
@@ -291,24 +305,24 @@ class EasyTdxProvider:
         if not symbols:
             return {}
         try:
-            c = self._get_client()
-            out: dict[str, dict | None] = {}
-            for i in range(0, len(symbols), _QUOTE_BATCH):
-                chunk = symbols[i:i + _QUOTE_BATCH]
-                pairs = [(_market_of_symbol(s), _code_of_symbol(s)) for s in chunk]
-                df = c.get_security_quotes(pairs)
-                if df is None or len(df) == 0:
-                    continue
-                for _, row in df.iterrows():
-                    sym = _to_app_symbol(str(row["code"]), int(row["market"]))
-                    bid_vols = [float(row.get(f"bid_vol{j}", 0) or 0) for j in range(1, 6)]
-                    ask_vols = [float(row.get(f"ask_vol{j}", 0) or 0) for j in range(1, 6)]
-                    out[sym] = {
-                        "ask_volumes": ask_vols,
-                        "bid_volumes": bid_vols,
-                        "timestamp": None,
-                    }
-            return out
+            with self._open_client() as c:
+                out: dict[str, dict | None] = {}
+                for i in range(0, len(symbols), _QUOTE_BATCH):
+                    chunk = symbols[i:i + _QUOTE_BATCH]
+                    pairs = [(_market_of_symbol(s), _code_of_symbol(s)) for s in chunk]
+                    df = c.get_security_quotes(pairs)
+                    if df is None or len(df) == 0:
+                        continue
+                    for _, row in df.iterrows():
+                        sym = _to_app_symbol(str(row["code"]), int(row["market"]))
+                        bid_vols = [float(row.get(f"bid_vol{j}", 0) or 0) for j in range(1, 6)]
+                        ask_vols = [float(row.get(f"ask_vol{j}", 0) or 0) for j in range(1, 6)]
+                        out[sym] = {
+                            "ask_volumes": ask_vols,
+                            "bid_volumes": bid_vols,
+                            "timestamp": None,
+                        }
+                return out
         except Exception as e:
             logger.warning("easy-tdx depth5 拉取失败(%d symbols): %s", len(symbols), e)
             return {}
@@ -325,31 +339,31 @@ class EasyTdxProvider:
         from easy_tdx import Category
 
         try:
-            mac = self._get_mac_client()
-            df = mac.get_stock_quotes_list(Category.A, count=6000)
-            if df is None or len(df) == 0:
-                return []
-            rows: list[dict] = []
-            for _, r in df.iterrows():
-                code = str(r["code"])
-                market = int(r["market"])
-                suffix = _to_app_symbol(code, market).split(".")[-1]
-                rows.append({
-                    "symbol": _to_app_symbol(code, market),
-                    "name": r.get("name"),
-                    "code": code,
-                    "exchange": suffix,
-                    "region": "CN",
-                    "type": "stock",
-                    "ext": {
-                        "pre_close": float(r["pre_close"]) if r.get("pre_close") else None,
-                        "limit_up": float(r.get("limit_up")) if r.get("limit_up") else None,
-                        "limit_down": float(r.get("limit_down")) if r.get("limit_down") else None,
-                        "float_shares": float(r.get("float_shares")) if r.get("float_shares") else None,
-                        "total_shares": float(r.get("total_shares")) if r.get("total_shares") else None,
-                    },
-                })
-            return rows
+            with self._open_mac() as mac:
+                df = mac.get_stock_quotes_list(Category.A, count=6000)
+                if df is None or len(df) == 0:
+                    return []
+                rows: list[dict] = []
+                for _, r in df.iterrows():
+                    code = str(r["code"])
+                    market = int(r["market"])
+                    suffix = _to_app_symbol(code, market).split(".")[-1]
+                    rows.append({
+                        "symbol": _to_app_symbol(code, market),
+                        "name": r.get("name"),
+                        "code": code,
+                        "exchange": suffix,
+                        "region": "CN",
+                        "type": "stock",
+                        "ext": {
+                            "pre_close": float(r["pre_close"]) if r.get("pre_close") else None,
+                            "limit_up": float(r.get("limit_up")) if r.get("limit_up") else None,
+                            "limit_down": float(r.get("limit_down")) if r.get("limit_down") else None,
+                            "float_shares": float(r.get("float_shares")) if r.get("float_shares") else None,
+                            "total_shares": float(r.get("total_shares")) if r.get("total_shares") else None,
+                        },
+                    })
+                return rows
         except Exception as e:
             logger.warning("easy-tdx instruments 拉取失败: %s", e)
             return []
