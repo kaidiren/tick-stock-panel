@@ -423,7 +423,8 @@ def _sanitize_for_yaml(config: dict) -> dict:
 
     datasets_out: dict = {}
     for ds_name, ds_cfg in (config.get("datasets") or {}).items():
-        if ds_name not in {"daily", "adj_factor", "realtime", "minute", "full_minute", "financial"}:
+        # depth5: 五档盘口数据集已开放(与 full_minute 同级), 供声明盘口端点的源使用。
+        if ds_name not in {"daily", "adj_factor", "realtime", "minute", "full_minute", "depth5", "financial"}:
             continue
         if not isinstance(ds_cfg, dict):
             continue

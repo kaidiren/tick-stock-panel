@@ -17,6 +17,7 @@
  *   adj          —— 除权因子: 取 hfq 与 none 收盘价, ex_factor = close_hfq / close_none
  *   minute       —— 分钟K(period 默认 5)
  *   realtime     —— 全 A 股实时快照(batch.cn)
+ *   depth5       —— 五档盘口(quotes.cn): 每 symbol 的 bid/ask 逐档 volume 数组 + timestamp
  *   instruments  —— 全 A 股标的维表(batch.cn 提取元数据)
  *   ping         —— 探活
  *
@@ -105,6 +106,18 @@ async function mapPool(items, concurrency, worker) {
 function toAppSymbol(code, marketId) {
   const suffix = MARKET_ID_TO_SUFFIX[String(marketId)] || guessSuffix(code)
   return suffix ? `${code}.${suffix}` : String(code)
+}
+
+/** app 符号(600519.SH) → stock-sdk quotes.cn 可识别的 小写前缀(sh600519)。
+
+ * stock-sdk 的 quotes.cn 对「code + 裸码/带点后缀」容错不佳(实测 600519.SH / 600519
+ * 均返回空), 只有 小写前缀(sh600519 / sz000001 / bj920000) 能命中。这里做显式映射。
+ */
+function toQuotesCode(appSymbol) {
+  const m = String(appSymbol).split('.')
+  const code = m[0]
+  const suffix = (m[1] || '').toLowerCase()
+  return suffix ? suffix + code : code
 }
 
 function guessSuffix(code) {
@@ -219,6 +232,29 @@ async function opRealtime(sdk, job) {
   return rows
 }
 
+async function opDepth5(sdk, job) {
+  const { symbols = [], concurrency = 6 } = job
+  const out = {}
+  // 逐 symbol 转小写前缀后批量查询; quotes.cn 接受数组(内部按 code 归一)。
+  // 分批提交, 每批转好的 quotesCode 数组对应原 appSymbol 列表, 回显原 appSymbol。
+  await mapPool(symbols, concurrency, async (appSym) => {
+    const qc = toQuotesCode(appSym)
+    const quotes = await fetchWithRetry(() => sdk.quotes.cn([qc]))
+    const q = Array.isArray(quotes) && quotes.length ? quotes[0] : null
+    if (!q) {
+      out[appSym] = null
+      return null
+    }
+    out[appSym] = {
+      bid: q.bid || [],
+      ask: q.ask || [],
+      timestamp: q.timestamp ?? null,
+    }
+    return out[appSym]
+  })
+  return out
+}
+
 async function opInstruments(sdk, job) {
   const { concurrency = 8 } = job
   const all = await sdk.batch.cn({ concurrency })
@@ -276,6 +312,9 @@ async function main() {
         break
       case 'realtime':
         rows = await opRealtime(sdk, job)
+        break
+      case 'depth5':
+        rows = await opDepth5(sdk, job)
         break
       case 'instruments':
         rows = await opInstruments(sdk, job)

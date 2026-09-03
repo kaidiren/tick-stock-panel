@@ -13,7 +13,8 @@ from app.tickflow.policy import _augment_custom_sources
 
 
 def _set_providers(monkeypatch, *, daily="tickflow", adj="tickflow",
-                   minute="tickflow", financial="tickflow", full_minute="tickflow") -> None:
+                   minute="tickflow", financial="tickflow", full_minute="tickflow",
+                   depth5="tickflow") -> None:
     """mock preferences 各数据集 provider getter。"""
     from app.services import preferences
     monkeypatch.setattr(preferences, "get_daily_data_provider", lambda: daily)
@@ -21,6 +22,7 @@ def _set_providers(monkeypatch, *, daily="tickflow", adj="tickflow",
     monkeypatch.setattr(preferences, "get_minute_data_provider", lambda: minute)
     monkeypatch.setattr(preferences, "get_financial_provider", lambda: financial)
     monkeypatch.setattr(preferences, "get_full_minute_data_provider", lambda: full_minute)
+    monkeypatch.setattr(preferences, "get_depth5_data_provider", lambda: depth5)
 
 
 def _set_datasets(monkeypatch, datasets: set[str]) -> None:
@@ -71,6 +73,26 @@ def test_full_minute_dataset_without_routing_not_granted(monkeypatch):
     capset = CapabilitySet()
     _augment_custom_sources(capset)
     assert not capset.has(Cap.INTRADAY_UNIVERSE)
+
+
+def test_depth5_custom_source_grants_depth5_batch(monkeypatch):
+    """五档盘口: 声明 depth5 数据集且被路由 → 补授 DEPTH5_BATCH (连板梯队封单门控)。"""
+    _set_providers(monkeypatch, depth5="mock_src")
+    _set_datasets(monkeypatch, {"depth5"})
+    capset = CapabilitySet()
+    _augment_custom_sources(capset)
+    assert capset.has(Cap.DEPTH5_BATCH)
+    # 声明 depth5 不等于声明 minute → 不补逐标的分钟K能力
+    assert not capset.has(Cap.KLINE_MINUTE_BATCH)
+
+
+def test_depth5_dataset_without_routing_not_granted(monkeypatch):
+    """源声明了 depth5 但路由仍是 tickflow → 不增广。"""
+    _set_providers(monkeypatch, depth5="tickflow")
+    _set_datasets(monkeypatch, {"depth5"})
+    capset = CapabilitySet()
+    _augment_custom_sources(capset)
+    assert not capset.has(Cap.DEPTH5_BATCH)
 
 
 def test_minute_custom_source_grants_minute_batch(monkeypatch):

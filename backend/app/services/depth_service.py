@@ -292,7 +292,19 @@ class DepthService:
             self._persist(enriched_date)
 
     def _call_depth_batch(self, symbols: list[str]) -> dict:
-        """调 tf.depth.batch, 按 capset 的 batch 切片 + 节流。返回 {symbol: MarketDepth}。"""
+        """拉取五档盘口, 返回 {symbol: {ask_volumes, bid_volumes, timestamp}}。
+
+        优先走自定义/插件源 (偏好 depth5_data_provider, 需声明 depth5 数据集且实现
+        get_depth5_batch); 否则回退 TickFlow tf.depth.batch(按 capset 的 batch 切片+节流)。
+        """
+        provider, fallback = self._resolve_depth5_provider()
+        if not fallback and provider is not None:
+            depth_data = self._call_depth5_provider(provider, symbols)
+            if depth_data:
+                return depth_data
+            logger.warning("depth sealed: custom/plugin depth5 源返回空, 回退 TickFlow")
+            # 自定义源拉空时继续走 TickFlow, 保证接口不被单点拖垮
+
         from app.tickflow.client import get_client
         tf = get_client()
 
@@ -312,6 +324,41 @@ class DepthService:
                 logger.warning("depth.batch 第 %d 批失败(%d 只): %s", i + 1, len(chunk), e)
                 # 单批失败不影响其他批
         return result
+
+    def _resolve_depth5_provider(self) -> tuple[object | None, bool]:
+        """解析 depth5 生效的自定义/插件源。
+
+        返回 (provider_or_None, should_fallback):
+        - 偏好 tickflow / 未声明 depth5 数据集 / 无 get_depth5_batch 方法 → (None, True)
+        - resolver 异常 → (None, True)
+        - 成功 → (provider, False)
+        """
+        try:
+            from app.data_providers import custom as custom_sources
+            from app.services import preferences
+
+            name = preferences.get_depth5_data_provider()
+            if name == "tickflow":
+                return (None, True)
+            if not custom_sources.provider_has_dataset(name, "depth5"):
+                return (None, True)
+            provider = custom_sources.get_provider(name)
+            if not callable(getattr(provider, "get_depth5_batch", None)):
+                # 未实现五档拉取的源: 声明了数据集也要回退, 避免 AttributeError
+                logger.warning("depth5 provider %s 未实现 get_depth5_batch, 回退 TickFlow", name)
+                return (None, True)
+            return (provider, False)
+        except Exception as e:
+            logger.debug("depth5 provider 解析失败: %s", e)
+            return (None, True)
+
+    def _call_depth5_provider(self, provider: object, symbols: list[str]) -> dict:
+        """调用自定义/插件源的 get_depth5_batch, 返回非空 dict 或空 dict。"""
+        try:
+            return provider.get_depth5_batch(symbols) or {}
+        except Exception as e:
+            logger.warning("depth5 provider 调用失败: %s", e)
+            return {}
 
     def finalize(self) -> None:
         """盘后定版: 拉一次 + 落盘。"""

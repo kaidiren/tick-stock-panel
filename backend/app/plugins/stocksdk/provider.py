@@ -25,7 +25,8 @@ from app.tickflow.rate_limits import chunked
 logger = logging.getLogger(__name__)
 
 # stock-sdk 支持的数据集(financial 不支持 → 不声明, 自动回退 tickflow)
-_DATASETS = ("daily", "adj_factor", "minute", "realtime")
+# depth5: quotes.cn 返回五档 bid/ask → 转成项目 depth5 sealed 契约(ask_volumes/bid_volumes)。
+_DATASETS = ("daily", "adj_factor", "minute", "realtime", "depth5")
 
 # 每次桥接调用的符号数。桥接内部按 concurrency 并发, 分批仅为进度反馈与超时控制。
 _BATCH = 40
@@ -305,6 +306,37 @@ class StockSDKProvider:
             return []
         return result.get("rows") or []
 
+    # ---- depth5 (五档盘口) ----
+    def get_depth5_batch(self, symbols: list[str]) -> dict:
+        """按标的批量拉五档, 转成项目 depth_service 需要的 sealed 契约。
+
+        bridge 的 depth5 op 返回 {appSymbol: {bid, ask, timestamp}} (bid/ask 为
+        [{price, volume}] 5 档数组, 与 tickflow depth.batch 语义一致); 这里把逐档
+        volume 抽成 ask_volumes / bid_volumes(纯数值数组), 供 depth_service 取
+        ask_volumes[0]/bid_volumes[0] 判断真假封。取不到五档的标的置 None(不抛)。
+        """
+        if not symbols:
+            return {}
+        try:
+            result = bridge.run_job({"op": "depth5", "symbols": symbols}, timeout=120)
+        except bridge.StockSDKBridgeError as e:
+            logger.warning("stock-sdk depth5 拉取失败(%d symbols): %s", len(symbols), e)
+            return {}
+        raw = result.get("rows") or {}
+        depth: dict[str, dict | None] = {}
+        for sym, d in raw.items():
+            if not d:
+                depth[sym] = None
+                continue
+            ask = d.get("ask") or []
+            bid = d.get("bid") or []
+            depth[sym] = {
+                "ask_volumes": [lvl.get("volume") for lvl in ask],
+                "bid_volumes": [lvl.get("volume") for lvl in bid],
+                "timestamp": d.get("timestamp"),
+            }
+        return depth
+
     # ---- 测试(设置页试拉) ----
     def test_dataset(self, dataset: str, symbols: list[str] | None = None) -> dict:
         symbols = symbols or ["600519.SH"]
@@ -326,6 +358,19 @@ class StockSDKProvider:
                 "rows": len(rows),
                 "columns": list(head[0].keys()) if head else [],
                 "preview": head,
+            }
+        if dataset == "depth5":
+            device = self.get_depth5_batch(symbols)
+            # preview 取前 5 只, 展示窗口字段; rows 为命中数
+            preview = []
+            for sym, d in list(device.items())[:5]:
+                preview.append({"symbol": sym, **(d or {})})
+            return {
+                "provider": self.name,
+                "dataset": "depth5",
+                "rows": sum(1 for d in device.values() if d),
+                "columns": ["symbol", "ask_volumes", "bid_volumes", "timestamp"],
+                "preview": preview,
             }
         raise ValueError(f"stock-sdk 不支持数据集: {dataset}")
 

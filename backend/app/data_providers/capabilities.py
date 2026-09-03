@@ -67,7 +67,9 @@ CAPABILITY_REGISTRY: list[dict] = [
         "field": "depth5_data_provider",
         "default": "tickflow",
         "tf_tier": "pro",
-        # 插件契约暂未开放 depth5 数据集 (loader 白名单), 当前仅 TickFlow 供
+        # 插件/自定义源声明 depth5 数据集即可提供(provider 需实现 get_depth5_batch,
+        # 如 stock-sdk); loader 白名单已开放 depth5。路由到该源时 policy 补授
+        # DEPTH5_BATCH 能力, depth_service 走 provider 拉五档, 否则回退 TickFlow。
     },
     {
         "id": "financial",

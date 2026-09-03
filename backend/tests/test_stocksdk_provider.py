@@ -113,6 +113,70 @@ def test_empty_symbols_returns_empty():
     assert p.get_daily([], None, None).is_empty()
     assert p.get_adj_factors([], None, None).is_empty()
     assert p.get_minute([], None, None).is_empty()
+    assert p.get_depth5_batch([]) == {}
+
+
+# ---------- depth5 (五档盘口) 归一化 ----------
+
+def test_get_depth5_batch_maps_bid_ask_volumes(monkeypatch):
+    """bridge depth5 op 返回 {sym:{bid,ask,timestamp}} → 转成纯 vol 数组契约。
+
+    depth_service 需要 ask_volumes[0]/bid_volumes[0] 判断真假封, 单位一致(股)。
+    """
+    _patch_run_job(monkeypatch, {
+        "depth5": {"ok": True, "op": "depth5", "rows": {
+            "600519.SH": {
+                "bid": [{"price": 1297.5, "volume": 7}, {"price": 1297.4, "volume": 8}],
+                "ask": [{"price": 1297.54, "volume": 3}, {"price": 1297.55, "volume": 2}],
+                "timestamp": 1788336884000,
+            },
+        }},
+    })
+    out = StockSDKProvider().get_depth5_batch(["600519.SH"])
+    assert out["600519.SH"] == {
+        "ask_volumes": [3, 2],
+        "bid_volumes": [7, 8],
+        "timestamp": 1788336884000,
+    }
+
+
+def test_get_depth5_batch_empty_or_null_entry_becomes_none(monkeypatch):
+    """bridge mapPool 对取不到五档的标的回写 null → provider 置 None(不抛)。"""
+    _patch_run_job(monkeypatch, {
+        "depth5": {"ok": True, "op": "depth5", "rows": {
+            "600519.SH": None,
+            "000001.SZ": {"bid": [], "ask": [], "timestamp": None},
+        }},
+    })
+    out = StockSDKProvider().get_depth5_batch(["600519.SH", "000001.SZ"])
+    assert out["600519.SH"] is None
+    assert out["000001.SZ"]["ask_volumes"] == []
+    assert out["000001.SZ"]["bid_volumes"] == []
+    assert out["000001.SZ"]["timestamp"] is None
+
+
+def test_get_depth5_batch_bridge_error_degrades_to_empty(monkeypatch):
+    """bridge 报错(限流/超时) → 返回空 dict, 由 depth_service 回退 TickFlow。"""
+
+    def boom(job, timeout=None):
+        raise sp.bridge.StockSDKBridgeError("node missing")
+
+    monkeypatch.setattr(sp.bridge, "run_job", boom)
+    assert StockSDKProvider().get_depth5_batch(["600519.SH"]) == {}
+
+
+def test_dep5_declared_in_datasets(monkeypatch):
+    """depth5 进入 provider 声明的数据集 (能力矩阵与 provider_has_dataset 靠它)。"""
+    from app.data_providers import custom as cs
+
+    p = StockSDKProvider()
+    assert "depth5" in p.config.datasets
+    # 注册进 loader 后可被 provider_has_dataset 识别 (复用既有注册测试, 仅断言数据集)
+    monkeypatch.setattr("app.data_providers.custom.loader._call_check", lambda ref: (True, "ok"))
+    monkeypatch.setattr("app.data_providers.custom.loader._load_entry", _load_stocksdk_entry)
+    from app.data_providers.custom import loader
+    loader._load_builtin_plugins()
+    assert cs.provider_has_dataset("stocksdk", "depth5")
 
 
 def test_bridge_error_degrades_to_empty(monkeypatch):
