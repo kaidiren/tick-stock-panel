@@ -307,13 +307,13 @@ class StockSDKProvider:
         return result.get("rows") or []
 
     # ---- depth5 (五档盘口) ----
-    def get_depth5_batch(self, symbols: list[str]) -> dict:
-        """按标的批量拉五档, 转成项目 depth_service 需要的 sealed 契约。
+    def get_depth_batch(self, symbols: list[str]) -> dict:
+        """按标的批量拉五档, 转成 get_depth_batch 插件契约。
 
         bridge 的 depth5 op 返回 {appSymbol: {bid, ask, timestamp}} (bid/ask 为
-        [{price, volume}] 5 档数组, 与 tickflow depth.batch 语义一致); 这里把逐档
-        volume 抽成 ask_volumes / bid_volumes(纯数值数组), 供 depth_service 取
-        ask_volumes[0]/bid_volumes[0] 判断真假封。取不到五档的标的置 None(不抛)。
+        [{price, volume}] 5 档数组, 数量单位为手); 这里拆成 bid_prices/bid_volumes/
+        ask_prices/ask_volumes 数组, 供 depth_service 取 volumes[0] 判断真假封。
+        取不到五档的标的置 None(不抛)。
         """
         if not symbols:
             return {}
@@ -331,8 +331,10 @@ class StockSDKProvider:
             ask = d.get("ask") or []
             bid = d.get("bid") or []
             depth[sym] = {
-                "ask_volumes": [lvl.get("volume") for lvl in ask],
+                "bid_prices": [lvl.get("price") for lvl in bid],
                 "bid_volumes": [lvl.get("volume") for lvl in bid],
+                "ask_prices": [lvl.get("price") for lvl in ask],
+                "ask_volumes": [lvl.get("volume") for lvl in ask],
                 "timestamp": d.get("timestamp"),
             }
         return depth
@@ -360,7 +362,7 @@ class StockSDKProvider:
                 "preview": head,
             }
         if dataset == "depth5":
-            device = self.get_depth5_batch(symbols)
+            device = self.get_depth_batch(symbols)
             # preview 取前 5 只, 展示窗口字段; rows 为命中数
             preview = []
             for sym, d in list(device.items())[:5]:

@@ -125,8 +125,8 @@ def test_get_minute_accepts_tz_aware_window(monkeypatch):
 
 # ---------- depth5 归一化 ----------
 
-def test_get_depth5_batch_maps_bid_ask_volumes(monkeypatch):
-    """标准协议 get_security_quotes 的 bid_vol1..5/ask_vol1..5 → 纯数组契约。"""
+def test_get_depth_batch_maps_bid_ask(monkeypatch):
+    """标准协议 get_security_quotes 的 bid/ask 五档 → prices/volumes 数组契约。"""
     p = EasyTdxProvider()
 
     class FakeClient:
@@ -143,20 +143,22 @@ def test_get_depth5_batch_maps_bid_ask_volumes(monkeypatch):
             }])
 
     monkeypatch.setattr(p, "_open_client", lambda: _ctx(FakeClient()))
-    out = p.get_depth5_batch(["600519.SH"])
-    assert out["600519.SH"]["ask_volumes"] == [3.0, 2.0, 1.0, 1.0, 2.0]
+    out = p.get_depth_batch(["600519.SH"])
+    assert out["600519.SH"]["bid_prices"] == [1297.5, 1297.4, 1297.37, 1297.33, 1297.2]
     assert out["600519.SH"]["bid_volumes"] == [7.0, 8.0, 1.0, 1.0, 1.0]
+    assert out["600519.SH"]["ask_prices"] == [1297.54, 1297.55, 1297.6, 1297.61, 1297.66]
+    assert out["600519.SH"]["ask_volumes"] == [3.0, 2.0, 1.0, 1.0, 2.0]
 
 
-def test_get_depth5_batch_empty_symbols(monkeypatch):
+def test_get_depth_batch_empty_symbols(monkeypatch):
     p = EasyTdxProvider()
-    assert p.get_depth5_batch([]) == {}
+    assert p.get_depth_batch([]) == {}
 
 
-def test_get_depth5_batch_exception_degrades_to_empty(monkeypatch):
+def test_get_depth_batch_exception_degrades_to_empty(monkeypatch):
     p = EasyTdxProvider()
     monkeypatch.setattr(p, "_open_client", lambda: _ctx(_Thrower("boom")))
-    assert p.get_depth5_batch(["600519.SH"]) == {}
+    assert p.get_depth_batch(["600519.SH"]) == {}
 
 
 # ---------- realtime 归一化 ----------

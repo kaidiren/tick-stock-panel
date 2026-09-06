@@ -317,12 +317,12 @@ class EasyTdxProvider:
         return self.get_minute(symbols, None, None, asset_type, "1m", None)
 
     # ---- depth5 (五档盘口) ----
-    def get_depth5_batch(self, symbols: list[str]) -> dict:
-        """按标的批量拉五档, 转成 depth_service sealed 契约。
+    def get_depth_batch(self, symbols: list[str]) -> dict:
+        """按标的批量拉五档, 转成 get_depth_batch 插件契约。
 
         标准协议 get_security_quotes 返回 bid1/bid_vol1...bid5/ask1/ask_vol1...ask5,
-        vol 单位为股, 与 tickflow depth.batch 语义一致; 抽成 ask_volumes/bid_volumes
-        数组供 depth_service 取 ask_volumes[0]/bid_volumes[0] 判断真假封。
+        数量单位为手; 拆成 bid_prices/bid_volumes/ask_prices/ask_volumes 数组,
+        供 depth_service 取 volumes[0] 判断真假封。
         """
         if not symbols:
             return {}
@@ -337,11 +337,11 @@ class EasyTdxProvider:
                         continue
                     for _, row in df.iterrows():
                         sym = _to_app_symbol(str(row["code"]), int(row["market"]))
-                        bid_vols = [float(row.get(f"bid_vol{j}", 0) or 0) for j in range(1, 6)]
-                        ask_vols = [float(row.get(f"ask_vol{j}", 0) or 0) for j in range(1, 6)]
                         out[sym] = {
-                            "ask_volumes": ask_vols,
-                            "bid_volumes": bid_vols,
+                            "bid_prices": [row.get(f"bid{j}") for j in range(1, 6)],
+                            "bid_volumes": [float(row.get(f"bid_vol{j}", 0) or 0) for j in range(1, 6)],
+                            "ask_prices": [row.get(f"ask{j}") for j in range(1, 6)],
+                            "ask_volumes": [float(row.get(f"ask_vol{j}", 0) or 0) for j in range(1, 6)],
                             "timestamp": None,
                         }
                 return out
@@ -416,7 +416,7 @@ class EasyTdxProvider:
                 "preview": head,
             }
         if dataset == "depth5":
-            device = self.get_depth5_batch(symbols)
+            device = self.get_depth_batch(symbols)
             preview = [{"symbol": s, **(d or {})} for s, d in list(device.items())[:5]]
             return {
                 "provider": self.name,

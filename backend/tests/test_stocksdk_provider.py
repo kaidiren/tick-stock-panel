@@ -113,15 +113,15 @@ def test_empty_symbols_returns_empty():
     assert p.get_daily([], None, None).is_empty()
     assert p.get_adj_factors([], None, None).is_empty()
     assert p.get_minute([], None, None).is_empty()
-    assert p.get_depth5_batch([]) == {}
+    assert p.get_depth_batch([]) == {}
 
 
 # ---------- depth5 (五档盘口) 归一化 ----------
 
-def test_get_depth5_batch_maps_bid_ask_volumes(monkeypatch):
-    """bridge depth5 op 返回 {sym:{bid,ask,timestamp}} → 转成纯 vol 数组契约。
+def test_get_depth_batch_maps_bid_ask(monkeypatch):
+    """bridge depth5 op 返回 {sym:{bid,ask,timestamp}} → 拆成 prices/volumes 数组契约。
 
-    depth_service 需要 ask_volumes[0]/bid_volumes[0] 判断真假封, 单位一致(股)。
+    depth_service 需要 ask_volumes[0]/bid_volumes[0] 判断真假封; 数量单位为手。
     """
     _patch_run_job(monkeypatch, {
         "depth5": {"ok": True, "op": "depth5", "rows": {
@@ -132,15 +132,17 @@ def test_get_depth5_batch_maps_bid_ask_volumes(monkeypatch):
             },
         }},
     })
-    out = StockSDKProvider().get_depth5_batch(["600519.SH"])
+    out = StockSDKProvider().get_depth_batch(["600519.SH"])
     assert out["600519.SH"] == {
-        "ask_volumes": [3, 2],
+        "bid_prices": [1297.5, 1297.4],
         "bid_volumes": [7, 8],
+        "ask_prices": [1297.54, 1297.55],
+        "ask_volumes": [3, 2],
         "timestamp": 1788336884000,
     }
 
 
-def test_get_depth5_batch_empty_or_null_entry_becomes_none(monkeypatch):
+def test_get_depth_batch_empty_or_null_entry_becomes_none(monkeypatch):
     """bridge mapPool 对取不到五档的标的回写 null → provider 置 None(不抛)。"""
     _patch_run_job(monkeypatch, {
         "depth5": {"ok": True, "op": "depth5", "rows": {
@@ -148,21 +150,21 @@ def test_get_depth5_batch_empty_or_null_entry_becomes_none(monkeypatch):
             "000001.SZ": {"bid": [], "ask": [], "timestamp": None},
         }},
     })
-    out = StockSDKProvider().get_depth5_batch(["600519.SH", "000001.SZ"])
+    out = StockSDKProvider().get_depth_batch(["600519.SH", "000001.SZ"])
     assert out["600519.SH"] is None
     assert out["000001.SZ"]["ask_volumes"] == []
     assert out["000001.SZ"]["bid_volumes"] == []
     assert out["000001.SZ"]["timestamp"] is None
 
 
-def test_get_depth5_batch_bridge_error_degrades_to_empty(monkeypatch):
-    """bridge 报错(限流/超时) → 返回空 dict, 由 depth_service 回退 TickFlow。"""
+def test_get_depth_batch_bridge_error_degrades_to_empty(monkeypatch):
+    """bridge 报错(限流/超时) → 返回空 dict, 由 depth_service 跳过本轮。"""
 
     def boom(job, timeout=None):
         raise sp.bridge.StockSDKBridgeError("node missing")
 
     monkeypatch.setattr(sp.bridge, "run_job", boom)
-    assert StockSDKProvider().get_depth5_batch(["600519.SH"]) == {}
+    assert StockSDKProvider().get_depth_batch(["600519.SH"]) == {}
 
 
 def test_dep5_declared_in_datasets(monkeypatch):

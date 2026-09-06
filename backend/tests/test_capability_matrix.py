@@ -203,32 +203,24 @@ def test_adj_factor_routes_independently(monkeypatch):
 
 
 def test_depth5_capability_semantics(monkeypatch):
-    """五档: pro+ 档 TickFlow 可供 (usable); 档位不足时不可用且无候选。
-
-    depth5 数据集已开放: 声明 depth5 的插件/自定义源进候选, 路由到它则 usable
-    (即使 TickFlow 档位不足); 未路由且档位不足才不可用。
-    """
+    """五档可独立路由到声明 depth5 的插件, 不受 TickFlow 档位限制。"""
     _fake_sources(
         monkeypatch,
-        [{"name": "stocksdk", "display_name": "stock-sdk", "datasets": ["realtime", "depth5"],
+        [{"name": "depth_src", "display_name": "Depth", "datasets": ["depth5"],
           "available": True, "status": "ok"}],
     )
     # pro 档: TickFlow 进候选, 默认路由 tickflow → usable; 声明 depth5 的插件也进候选
     cap = _by_id(build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier="pro"))["depth5"]
     assert cap["tf_available"] is True
-    assert [c["name"] for c in cap["candidates"]] == ["tickflow", "stocksdk"]
+    assert [c["name"] for c in cap["candidates"]] == ["tickflow", "depth_src"]
     assert cap["usable"] is True
-    # starter 档: 档位不足 → TickFlow 无候选; 路由到声明 depth5 的插件 → usable
-    routed = dict(DEFAULT_CURRENT, depth5_data_provider="stocksdk")
-    cap = _by_id(build_capability_matrix(routed, tickflow_tier="starter"))["depth5"]
+    # starter 档: TickFlow 不可供, 但显式路由到插件后仍可用
+    current = dict(DEFAULT_CURRENT, depth5_data_provider="depth_src")
+    cap = _by_id(build_capability_matrix(current, tickflow_tier="starter"))["depth5"]
     assert cap["tf_available"] is False
-    assert [c["name"] for c in cap["candidates"]] == ["stocksdk"]
+    assert [c["name"] for c in cap["candidates"]] == ["depth_src"]
+    assert cap["effective"] == "depth_src"
     assert cap["usable"] is True
-    # 档位不足且未路由 → 不可用
-    cap = _by_id(build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier="starter"))["depth5"]
-    assert cap["tf_available"] is False
-    assert [c["name"] for c in cap["candidates"]] == ["stocksdk"]
-    assert cap["usable"] is False
 
 
 def test_unknown_current_display_falls_back_to_name(monkeypatch):
