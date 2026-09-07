@@ -355,6 +355,11 @@ class EasyTdxProvider:
 
         用 MAC 协议全市场报价列表(get_stock_quotes_list)一次拉全市场(~5565 只, ~2s),
         复用 instrument_sync 的 flatten 路径。仅股票(asset_type=stock 时), 其他返回空。
+
+        注意: 故意不输出 limit_up/limit_down/pre_close — 它们是随每日昨收变化的
+        日频动态值, 快照抓的只是"当时"的盘口价, 写进静态维表必然过期, 会被
+        _get_price_limit_info 当"权威价"误用(分时轴被钳到昨天的涨跌停范围)。
+        当日权威涨跌停价由设置页/实时行情链路按日提供, 不走维表。
         """
         if asset_type != "stock":
             return []
@@ -378,9 +383,6 @@ class EasyTdxProvider:
                         "region": "CN",
                         "type": "stock",
                         "ext": {
-                            "pre_close": float(r["pre_close"]) if r.get("pre_close") else None,
-                            "limit_up": float(r.get("limit_up")) if r.get("limit_up") else None,
-                            "limit_down": float(r.get("limit_down")) if r.get("limit_down") else None,
                             "float_shares": float(r.get("float_shares")) if r.get("float_shares") else None,
                             "total_shares": float(r.get("total_shares")) if r.get("total_shares") else None,
                         },

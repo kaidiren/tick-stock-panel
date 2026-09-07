@@ -309,6 +309,34 @@ def _get_price_limit_info(
         if math.isfinite(numeric) and 0 < numeric < 10_000:
             info[field] = numeric
             has_authoritative_price = True
+
+    # 权威价交叉校验: 维表是"同步当日"的快照, limit_up/limit_down 是那一天的
+    # 盘口涨跌停价, 跨日后必然过期 (如 9/4 盘后同步, 9/7 分时图会把轴钳到
+    # 昨日的 ±10% 范围外)。涨跌停价 = round(昨收×(1±rate), 2) 是数学事实,
+    # 与今日昨收(本地日K)不符即说明维表过期, 成对弃用并回退规则价
+    # (两者基于同一昨收, 一个过期则另一个必过期, 不能混搭)。
+    if has_authoritative_price and trade_date == cn_today():
+        prev_close = _get_previous_closes(
+            repo, symbol, [trade_date], asset_type,
+        ).get(trade_date)
+        rate = info.get("rate")
+        if prev_close and rate:
+            stale = False
+            for field, sign in (("limit_up", 1), ("limit_down", -1)):
+                if info.get(field) is None:
+                    continue
+                expected = round(prev_close * (1 + sign * float(rate)) + 1e-9, 2)
+                if abs(info[field] - expected) > 0.011:
+                    logger.warning(
+                        "instruments %s %s=%s 与今日昨收 %s 推导的 %s 不符, 维表已过期, 成对弃用回退规则价",
+                        symbol, field, info[field], prev_close, expected,
+                    )
+                    stale = True
+            if stale:
+                info["limit_up"] = None
+                info["limit_down"] = None
+                has_authoritative_price = False
+
     if has_authoritative_price:
         info["source"] = "instrument"
     return info

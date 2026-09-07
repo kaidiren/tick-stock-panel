@@ -148,6 +148,55 @@ def test_minute_price_limit_prefers_authoritative_prices_only_today(monkeypatch)
     }
 
 
+class _StaleInstrumentRepo:
+    """维表 limit_up/limit_down 是"同步当日"快照, 跨日后与今日昨收不符。"""
+
+    def __init__(self, limit_up: float, limit_down: float) -> None:
+        self._up = limit_up
+        self._down = limit_down
+
+    def get_instruments_asset(self, asset_type: str) -> pl.DataFrame:
+        return pl.DataFrame({
+            "symbol": ["002436.SZ"],
+            "limit_up": [self._up],
+            "limit_down": [self._down],
+        })
+
+
+def test_minute_price_limit_discards_stale_instrument_prices(monkeypatch):
+    """回归: 分时图涨跌幅轴被放大 — 维表跨日过期的权威涨跌停价必须弃用。
+
+    002436 实测: 9/4 盘后同步的维表 limit_up=38.71/limit_down=31.67 (基于
+    9/3 收盘 35.19), 9/7 真实昨收 33.41 → 真实涨跌停 36.75/30.07。过期权威价
+    会把分时图 y 轴钳到 ±15.86%, 视觉上涨跌幅"像 ×2"。
+    校验: 与今日昨收推导值不符 → 成对弃用回退规则; 当日同步的价则保留。
+    """
+    today = date(2026, 9, 7)
+    monkeypatch.setattr(kline, "cn_today", lambda: today)
+    # 今日昨收 33.41 (9/4 收盘)
+    monkeypatch.setattr(
+        kline, "_get_previous_closes",
+        lambda repo, symbol, trade_dates, asset_type: {today: 33.41},
+    )
+
+    # 过期权威价 (基于 9/3 收盘 35.19): 与 33.41 推导的 36.75/30.07 不符 → 弃用
+    info = kline._get_price_limit_info(
+        _StaleInstrumentRepo(38.71, 31.67), "002436.SZ", today, "stock", "兴森科技",
+    )
+    assert info == {"rate": 0.10, "limit_up": None, "limit_down": None, "source": "rule"}
+
+    # 当日同步的权威价 (与昨收推导一致, 容差 1 分): 保留
+    info_ok = kline._get_price_limit_info(
+        _StaleInstrumentRepo(36.75, 30.07), "002436.SZ", today, "stock", "兴森科技",
+    )
+    assert info_ok == {
+        "rate": 0.10,
+        "limit_up": 36.75,
+        "limit_down": 30.07,
+        "source": "instrument",
+    }
+
+
 def _daily_limit_rows(current_close: float) -> pl.DataFrame:
     return pl.DataFrame({
         "symbol": ["600001.SH", "600001.SH"],

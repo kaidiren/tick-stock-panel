@@ -263,6 +263,8 @@ async function opInstruments(sdk, job) {
     if (!q || !q.code) continue
     const suffix = MARKET_ID_TO_SUFFIX[String(q.marketId)] || guessSuffix(q.code)
     // 形状对齐 tickflow 的 Instrument(数值扩展字段放 ext),以复用 instrument_sync 的 flatten。
+    // 注意: 故意不输出 limit_up/limit_down — 涨跌停价随每日昨收变化, 是日频动态值,
+    // 写进静态维表必然过期, 会被 _get_price_limit_info 当"权威价"误用。
     rows.push({
       symbol: toAppSymbol(q.code, q.marketId),
       name: q.name,
@@ -273,8 +275,6 @@ async function opInstruments(sdk, job) {
       ext: {
         total_shares: q.totalShares ?? null,
         float_shares: q.circulatingShares ?? null,
-        limit_up: q.limitUp ?? null,
-        limit_down: q.limitDown ?? null,
       },
     })
   }
