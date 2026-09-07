@@ -303,3 +303,69 @@ def test_limit_down_recovery_uses_raw_low_under_later_ex_div():
     assert day2["signal_limit_down_recovery"][0] is False
     day3 = df.filter(pl.col("date") == date(2024, 1, 4))
     assert day3["signal_limit_down_recovery"][0] is True
+
+
+def test_limit_signal_uses_price_as_of_semantics():
+    """回归: 浙江荣泰(603119) 涨停未出现在首板梯队。
+
+    维表 limit_up 是"同步时刻"的盘口价 — 盘前/盘后同步拿到的是上一交易日的
+    值。603119 实测: 9/3 收 48.71 → 维表 limit_up 53.58 (9/4 的涨停价),
+    9/7 真实昨收 46.95 → 理论涨停 51.65, 收 51.65 涨停; 若把该价当 9/7 权威
+    (as_of 误标同步当天), 51.65 < 53.58 → signal_limit_up=False → 首板从
+    梯队消失。修复: instrument_sync 的 as_of 语义 = 价格归属交易日 — 非交易
+    时段同步标上一交易日, pipeline 的 authoritative_date 校验自然回退理论价。
+    """
+    frame = pl.DataFrame({
+        "symbol": ["603119.SH"] * 2,
+        "date": [date(2026, 9, 4), date(2026, 9, 7)],
+        "open": [47.50, 47.80],
+        "high": [49.60, 51.65],
+        "low": [46.80, 47.50],
+        "close": [46.95, 51.65],
+        "raw_close": [46.95, 51.65],
+        "raw_high": [49.60, 51.65],
+        "raw_low": [46.80, 47.50],
+        "change_pct": [-0.036, 0.1001],
+        "vol_ratio_5d": [1.0, 1.0],
+        "prev_close": [48.71, 46.95],
+    })
+    needed = {"signal_limit_up", "consecutive_limit_ups"}
+
+    # 修复后语义: 过期价 (9/4 的涨停价 53.58) 的 as_of = 上一交易日 (9/4)
+    # → 9/7 行情日的 authoritative_date 不匹配 → 回退理论价 51.65 → 涨停成立
+    stale_but_correctly_dated = pl.DataFrame({
+        "symbol": ["603119.SH"],
+        "name": ["浙江荣泰"],
+        "limit_up": [53.58],
+        "limit_down": [43.84],
+        "as_of": [date(2026, 9, 4)],
+    })
+    out = pipeline.compute_limit_signals(frame, stale_but_correctly_dated, needed=needed)
+    today_row = out.filter(pl.col("date") == date(2026, 9, 7))
+    assert today_row["signal_limit_up"][0] is True
+    assert today_row["consecutive_limit_ups"][0] == 1
+
+    # 当日交易时段同步的正确权威价 (51.65): as_of=今日, 正常采纳, 判定不变
+    fresh = pl.DataFrame({
+        "symbol": ["603119.SH"],
+        "name": ["浙江荣泰"],
+        "limit_up": [51.65],
+        "limit_down": [42.26],
+        "as_of": [date(2026, 9, 7)],
+    })
+    out2 = pipeline.compute_limit_signals(frame, fresh, needed=needed)
+    today_row2 = out2.filter(pl.col("date") == date(2026, 9, 7))
+    assert today_row2["signal_limit_up"][0] is True
+
+    # 反例固化: as_of 被误标为今日 (旧 bug 行为) 时 53.58 会被当权威 → 漏判。
+    # 该行为由 _limit_price_as_of 的时段判定在源头阻断, 此处记录可观测症状。
+    mislabeled = pl.DataFrame({
+        "symbol": ["603119.SH"],
+        "name": ["浙江荣泰"],
+        "limit_up": [53.58],
+        "limit_down": [43.84],
+        "as_of": [date(2026, 9, 7)],
+    })
+    out3 = pipeline.compute_limit_signals(frame, mislabeled, needed=needed)
+    today_row3 = out3.filter(pl.col("date") == date(2026, 9, 7))
+    assert today_row3["signal_limit_up"][0] is False

@@ -71,6 +71,34 @@ def _fetch_instruments_via_provider() -> list[dict] | None:
     return rows
 
 
+def _limit_price_as_of(data_dir: Path) -> date:
+    """推断本次同步拿到的 limit_up/limit_down 的价格归属交易日。
+
+    上游维表接口的涨跌停价基于"当时的昨收"生成: 交易时段内 = 当日基准;
+    盘前(如定时任务 9:10)/盘后/周末 = 上一交易日基准。非交易时段用本地
+    日K的最近交易日作为归属日 (它就是"上一交易日"的权威记录); 无本地
+    日K时退回今天 (无更优信息, 与旧行为一致)。
+    """
+    from app.market_time import cn_now, in_continuous_session
+    if in_continuous_session():
+        return cn_now().date()
+    try:
+        import polars as pl
+        daily_dir = data_dir / "kline_daily"
+        partitions = sorted(d for d in daily_dir.iterdir() if d.is_dir() and d.name.startswith("date="))
+        if partitions:
+            latest = partitions[-1].name.removeprefix("date=")
+            probe = pl.scan_parquet(daily_dir / partitions[-1] / "part.parquet")
+            if "date" in probe.collect_schema().names():
+                dates = probe.select(pl.col("date").max()).collect().item()
+                if dates is not None:
+                    return dates if isinstance(dates, date) else date.fromisoformat(str(dates)[:10])
+            return date.fromisoformat(latest)
+    except Exception:  # noqa: BLE001
+        pass
+    return date.today()
+
+
 def sync_instruments(data_dir: Path) -> int:
     """全量同步标的维表 → data/instruments/instruments.parquet。
 
@@ -94,7 +122,14 @@ def sync_instruments(data_dir: Path) -> int:
         return 0
 
     df = pl.DataFrame(all_rows)
-    df = df.with_columns(pl.lit(date.today()).alias("as_of"))
+    # as_of 语义 = limit_up/limit_down 的"价格归属交易日", 不是同步执行日。
+    # 上游接口在非交易时段(盘前/盘后)返回的是上一交易日基准的涨跌停价
+    # (当日新基准要开盘才生成), 若把 as_of 打成同步当天, pipeline 会把
+    # 昨日的涨跌停价当今日权威值 (实测 603119 涨停因 53.58>51.65 漏出
+    # 首板梯队; 002436 分时轴被钳到 ±15.86%)。因此: 仅当日交易时段内
+    # 同步才标今日, 否则标本地日K的最近交易日(价的实际归属日)。
+    as_of = _limit_price_as_of(data_dir)
+    df = df.with_columns(pl.lit(as_of).alias("as_of"))
 
     out = data_dir / "instruments" / "instruments.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
