@@ -366,12 +366,17 @@ class EasyTdxProvider:
             return []
 
     # ---- minute ----
+    # 单连接串行拉全市场过慢 (5558 只 × ~5.6s ≈ 8.6h), 盘后 30 天同步不可用。
+    # 线程池并发 + 每线程独立 MacClient 连接 (单 TCP 连接多线程共享会竞争
+    # 请求/响应序号), 并发度实测 16 稳定; 单标的失败仅跳过不拖垮整轮。
+    _MINUTE_CONCURRENCY = 16
+
     def get_minute(
         self,
         symbols: list[str],
         start_time: datetime | None,
         end_time: datetime | None,
-        asset_type: str = "stock",
+        asset_type: str = "stock",  # noqa: ARG002
         freq: str = "1m",
         on_chunk_done: Callable[[int, int], None] | None = None,
     ) -> pl.DataFrame:
@@ -379,28 +384,42 @@ class EasyTdxProvider:
             return pl.DataFrame()
         period = _period_from_freq(freq)
         count = _minute_count_for_window(freq, start_time, end_time)
-        frames: list[pl.DataFrame] = []
         total = len(symbols)
-        with self._open_mac() as mac:
-            for i, sym in enumerate(symbols):
-                try:
-                    df = mac.get_stock_kline(_market_of_symbol(sym), _code_of_symbol(sym), period, count=count)
-                except Exception as e:
-                    logger.debug("easy-tdx minute 拉取失败(%s): %s", sym, e)
-                    continue
-                if df is None or len(df) == 0:
-                    continue
-                frame = _minute_frame(df, sym)
-                if (start_time is not None and end_time is not None):
-                    # start/end 可能是 tz-aware(如 CN_TZ 北京时间), 而 frame.datetime 是 naive
-                    # 北京墙钟 — 类型不一致会导致 polars is_between 抛 SchemaError, 剥时区后再比较。
-                    win_start = _strip_tz(start_time)
-                    win_end = _strip_tz(end_time)
-                    frame = frame.filter(pl.col("datetime").is_between(win_start, win_end))
-                if not frame.is_empty():
+        done = [0]
+        done_lock = threading.Lock()
+        win_start = _strip_tz(start_time)
+        win_end = _strip_tz(end_time)
+
+        def _fetch_one(sym: str) -> pl.DataFrame | None:
+            try:
+                with self._open_mac() as mac:
+                    df = mac.get_stock_kline(
+                        _market_of_symbol(sym), _code_of_symbol(sym), period, count=count,
+                    )
+            except Exception as e:
+                logger.debug("easy-tdx minute 拉取失败(%s): %s", sym, e)
+                return None
+            if df is None or len(df) == 0:
+                return None
+            frame = _minute_frame(df, sym)
+            if not frame.is_empty() and win_start is not None and win_end is not None:
+                # start/end 可能是 tz-aware(如 CN_TZ 北京时间), 而 frame.datetime 是
+                # naive 北京墙钟 — 直接 is_between 抛 SchemaError, 剥时区后再比较。
+                frame = frame.filter(pl.col("datetime").is_between(win_start, win_end))
+            return frame if not frame.is_empty() else None
+
+        from concurrent.futures import ThreadPoolExecutor
+        workers = min(self._MINUTE_CONCURRENCY, total)
+        frames: list[pl.DataFrame] = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for frame in pool.map(_fetch_one, symbols):
+                with done_lock:
+                    done[0] += 1
+                    cur, finished = done[0], True
+                if on_chunk_done and finished:
+                    on_chunk_done(cur, total)
+                if frame is not None:
                     frames.append(frame)
-                if on_chunk_done:
-                    on_chunk_done(i + 1, total)
         return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
     # ---- full_minute (修复轮: 当日窗口批量) ----

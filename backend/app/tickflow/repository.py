@@ -1564,6 +1564,17 @@ class KlineRepository:
         """按资产类型选择分钟K parquet glob。ETF 分钟数据独立存储于 kline_etf_minute。"""
         return self._etf_minute_glob if asset_type == "etf" else self._minute_glob
 
+    def _minute_has_data(self, asset_type: str) -> bool:
+        """空库守卫: 分钟目录无任何 parquet 时 (被清除/未同步) 跳过扫描。
+
+        scan_parquet 对空 glob 抛 "expanded paths were empty", 盘中每个分时
+        请求都会刷一条 WARNING; 从 glob 路径推导目录, 不依赖其他类的帮手。
+        """
+        import pathlib
+        glob = self._minute_glob_for(asset_type)
+        root = pathlib.Path(glob.split("**", 1)[0])
+        return root.exists() and any(root.rglob("*.parquet"))
+
     def get_minute(
         self,
         symbol: str,
@@ -1571,6 +1582,10 @@ class KlineRepository:
         asset_type: str = "stock",
     ) -> pl.DataFrame:
         """分钟K查询 — Polars scan_parquet + predicate pushdown。"""
+        # 空库守卫: 分钟数据被清除/尚未同步时目录为空, scan_parquet 的空 glob
+        # 会抛 "expanded paths were empty" 且每个分时请求都刷一条 WARNING。
+        if not self._minute_has_data(asset_type):
+            return pl.DataFrame()
         try:
             return guarded_collect(
                 pl.scan_parquet(self._minute_glob_for(asset_type)).filter(
@@ -1594,6 +1609,8 @@ class KlineRepository:
         避免逐只查询的 N 次 I/O。
         """
         if not symbols:
+            return pl.DataFrame()
+        if not self._minute_has_data(asset_type):
             return pl.DataFrame()
         try:
             return guarded_collect(
