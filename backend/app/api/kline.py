@@ -5,6 +5,7 @@ import gzip
 import json
 import logging
 import math
+import threading
 from datetime import date, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -20,6 +21,11 @@ from app.db_safe import is_valid_ext_ident
 from app.services import kline_sync
 
 logger = logging.getLogger(__name__)
+
+# 过期维表涨跌停价的告警去重: 每 (symbol, trade_date) 进程内只告警一次,
+# 首个请求发现维表过期后, 后续同标请求静默弃用 (用户重跑维表同步即自愈)。
+_STALE_LIMIT_WARNED: set[tuple[str, date]] = set()
+_STALE_LIMIT_WARNED_LOCK = threading.Lock()
 
 router = APIRouter(prefix="/api/kline", tags=["kline"])
 
@@ -327,12 +333,20 @@ def _get_price_limit_info(
                     continue
                 expected = round(prev_close * (1 + sign * float(rate)) + 1e-9, 2)
                 if abs(info[field] - expected) > 0.011:
-                    logger.warning(
-                        "instruments %s %s=%s 与今日昨收 %s 推导的 %s 不符, 维表已过期, 成对弃用回退规则价",
-                        symbol, field, info[field], prev_close, expected,
-                    )
                     stale = True
             if stale:
+                # 每 (symbol, 日期) 只告警一次 — 该校验在每个分时/分钟请求上
+                # 都会触发, 维表过期未重同步前同一标的会反复命中, 刷屏无益。
+                warn_key = (symbol, trade_date)
+                if warn_key not in _STALE_LIMIT_WARNED:
+                    with _STALE_LIMIT_WARNED_LOCK:
+                        if warn_key not in _STALE_LIMIT_WARNED:
+                            _STALE_LIMIT_WARNED.add(warn_key)
+                            logger.warning(
+                                "instruments %s limit_up/limit_down=%s/%s 与今日昨收 %s 推导值不符, "
+                                "维表已过期, 成对弃用回退规则价 (本会话不再重复提示; 重跑一次维表同步即可修复)",
+                                symbol, info.get("limit_up"), info.get("limit_down"), prev_close,
+                            )
                 info["limit_up"] = None
                 info["limit_down"] = None
                 has_authoritative_price = False

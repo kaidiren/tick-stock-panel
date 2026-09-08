@@ -19,15 +19,38 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from pathlib import Path
 
 import polars as pl
 
 from app.data_providers.normalizer import normalize_adj_factors, normalize_daily
 
 logger = logging.getLogger(__name__)
+
+# easy-tdx 的 best-host/测速缓存默认写 ~/.easy_tdx/。该目录可能不可写
+# (权限受限的 HOME / 沙箱 / 多进程并发 rename 竞态 Errno 2), 一旦写失败
+# from_best_host 整体抛异常 → 所有数据集失败。这里在 import easy_tdx 之前
+# 把配置目录指到项目 data 目录 (项目约定 data/ 不入 Git, 随运行时持久化),
+# 用户显式设置过 EASY_TDX_CONFIG_DIR 时尊重其配置。
+if not os.environ.get("EASY_TDX_CONFIG_DIR"):
+    try:
+        from app.config import settings as _app_settings
+
+        _EASY_TDX_DIR = Path(_app_settings.data_dir) / "easytdx"
+        _EASY_TDX_DIR.mkdir(parents=True, exist_ok=True)
+        os.environ["EASY_TDX_CONFIG_DIR"] = str(_EASY_TDX_DIR)
+    except Exception:  # noqa: BLE001 — 目录兜底失败时交回 easy-tdx 默认行为
+        pass
+
+# 进程内 best-host 缓存: 首次 from_best_host() 解析后复用, 避免每请求
+# ping_all 全主机测速 + 并发写 ~/.easy_tdx/config.json 的竞态 (Errno 2)。
+_BEST_HOST_CACHE: tuple[str, int] | None = None
+_BEST_HOST_LOCK = threading.Lock()
 
 # easy-tdx 支持的数据集(financial 不支持 → 不声明, 自动回退 tickflow)
 _DATASETS = ("daily", "adj_factor", "realtime", "minute", "full_minute", "depth5")
@@ -112,17 +135,59 @@ class EasyTdxProvider:
             with contextlib.suppress(Exception):
                 c.close()
 
+    # ---- best host 解析 (进程级缓存) ----
+    @staticmethod
+    def _resolve_best_host() -> tuple[str, int] | None:
+        """解析一次最优行情服务器并进程内缓存 (host, port)。
+
+        不能每请求调 from_best_host(): 它会对全部候选主机 ping_all 测速
+        (depth5 单请求从 ~0.2s 拖到 5s+), 且无条件 save_best_host 写
+        config.json — 并发请求同时写同一 tmp 文件会竞态 (replace 失败,
+        连接整体失败)。缓存后各 _open_* 直接按 host 构造 client
+        (auto_reconnect+心跳兜底断线)。返回 None 表示内部字段不可读
+        (easy-tdx 版本变更), 调用方回退 from_best_host() 旧行为。
+        """
+        global _BEST_HOST_CACHE
+        if _BEST_HOST_CACHE is None:
+            with _BEST_HOST_LOCK:
+                if _BEST_HOST_CACHE is None:
+                    from easy_tdx import TdxClient
+                    probe = TdxClient.from_best_host()
+                    try:
+                        host, port = probe._host, probe._port
+                    except AttributeError:
+                        logger.debug("easy-tdx TdxClient 内部 host 字段名变更, best-host 缓存不可用")
+                        host, port = None, None
+                    finally:
+                        probe.close()
+                    if host:
+                        _BEST_HOST_CACHE = (str(host), int(port))
+        return _BEST_HOST_CACHE
+        return _BEST_HOST_CACHE
+
+    @staticmethod
+    def _invalidate_best_host() -> None:
+        global _BEST_HOST_CACHE
+        _BEST_HOST_CACHE = None
+
     # ---- 客户端惰性初始化 ----
     @contextlib.contextmanager
     def _open_client(self):
         """标准协议 TdxClient 连接(每次新建, 用后即关)。
 
-        with TdxClient.from_best_host() as c: 比惰性复用连接更稳定 —— 复用同一连接
-        长时间易断/超时, 每次新建并 on-demand 取 best host, 保证 quota(五档/日K/标的)
-        类接口稳定返回。
+        复用同一物理连接长时间易断(实测偶发空结果), 每次新建但复用进程内
+        缓存的 best host — 省掉每请求的全主机测速与 config.json 并发写竞态。
+        首次用缓存 host 构造失败(服务器下线等)时清缓存重新解析一次;
+        内部字段不可读(easy-tdx 版本变更)时回退 from_best_host() 旧行为。
         """
         from easy_tdx import TdxClient
-        c = TdxClient.from_best_host()
+        cached = self._resolve_best_host()
+        try:
+            c = TdxClient(host=cached[0], port=cached[1]) if cached else TdxClient.from_best_host()
+        except Exception:
+            self._invalidate_best_host()
+            cached = self._resolve_best_host()
+            c = TdxClient(host=cached[0], port=cached[1]) if cached else TdxClient.from_best_host()
         try:
             yield c
         finally:
@@ -132,7 +197,13 @@ class EasyTdxProvider:
     def _open_mac(self):
         """MAC 协议 MacClient 连接(每次新建, 用后即关), 见 _open_client 说明。"""
         from easy_tdx.mac.client import MacClient
-        c = MacClient.from_best_host()
+        cached = self._resolve_best_host()
+        try:
+            c = MacClient(host=cached[0]) if cached else MacClient.from_best_host()
+        except Exception:
+            self._invalidate_best_host()
+            cached = self._resolve_best_host()
+            c = MacClient(host=cached[0]) if cached else MacClient.from_best_host()
         try:
             yield c
         finally:
