@@ -113,6 +113,33 @@ def _strip_tz(dt: datetime | None) -> datetime | None:
     return dt
 
 
+# 各分钟频率每天一根数 (连续竞价 4 小时) 与 count 上限。
+# 上限依据实测: 通达信服务器 1 分钟线 count=20000 仍可完整返回
+# (回溯至 ~80 个交易日), 30 天窗口(7200 根) 远在上限内。
+_MINUTE_BARS_PER_DAY = {"1": 240.0, "5": 48.0, "15": 16.0, "30": 8.0, "60": 4.0}
+_MINUTE_COUNT_CAP = 20000
+_MINUTE_COUNT_DEFAULT = 800
+
+
+def _minute_count_for_window(freq: str, start_time: datetime | None, end_time: datetime | None) -> int:
+    """按窗口跨度计算需要拉的分钟根数 (覆盖调用方要求的完整区间)。
+
+    通达信 MAC 协议按"最近 N 根"返回, 不认时间窗口 — count 必须足够覆盖
+    start~end 全程, 否则窗口过滤后只剩尾部碎段 (实测 30 天同步只回 300 根
+    ≈1.25 个交易日)。根数 = 自然日跨度 × 每天根数 × 节假日/停牌缓冲 1.5;
+    窗口未知时用保守默认 800 (约 3 个交易日, 兼顾盘中增量轮的成本)。
+    """
+    if start_time is None or end_time is None:
+        return _MINUTE_COUNT_DEFAULT
+    ws = _strip_tz(start_time)
+    we = _strip_tz(end_time)
+    if ws is None or we is None or we <= ws:
+        return _MINUTE_COUNT_DEFAULT
+    days = max(1.0, (we - ws).total_seconds() / 86400.0)
+    per_day = _MINUTE_BARS_PER_DAY.get("".join(ch for ch in str(freq) if ch.isdigit()), 240.0)
+    return min(_MINUTE_COUNT_CAP, int(days * per_day * 1.5) + 10)
+
+
 def _to_app_symbol(code: str, market: int) -> str:
     """code + market → app symbol(600519.SH)。"""
     suffix = {1: "SH", 0: "SZ", 2: "BJ"}.get(int(market), "")
@@ -351,12 +378,13 @@ class EasyTdxProvider:
         if not symbols:
             return pl.DataFrame()
         period = _period_from_freq(freq)
+        count = _minute_count_for_window(freq, start_time, end_time)
         frames: list[pl.DataFrame] = []
         total = len(symbols)
         with self._open_mac() as mac:
             for i, sym in enumerate(symbols):
                 try:
-                    df = mac.get_stock_kline(_market_of_symbol(sym), _code_of_symbol(sym), period, count=300)
+                    df = mac.get_stock_kline(_market_of_symbol(sym), _code_of_symbol(sym), period, count=count)
                 except Exception as e:
                     logger.debug("easy-tdx minute 拉取失败(%s): %s", sym, e)
                     continue
