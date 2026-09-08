@@ -1475,6 +1475,22 @@ def run_pipeline(data_dir: Path | None = None,
         instruments = scan_parquet_compat(inst_glob, cast_options=_cast).collect()
     except Exception as e:  # noqa: BLE001
         logger.warning("instruments 读取失败: %s", e)
+    # 读到空表不静默继续: 盘前管道与维表同步存在时序竞态 (sync 刚写完 parquet,
+    # scan 可能命中空文件列表), refill 会把 turnover_rate 全落 null
+    # (实测 9/8 分区 5549 行全 null)。隔 1s 重试一次; 仍空则明确告警指引。
+    if instruments.is_empty():
+        import time as _time
+
+        _time.sleep(1.0)
+        try:
+            instruments = scan_parquet_compat(inst_glob, cast_options=_cast).collect()
+        except Exception as _e:  # noqa: BLE001
+            logger.warning("instruments 重试仍失败: %s", _e)
+        if instruments.is_empty():
+            logger.warning(
+                "instruments 维表为空 — 本轮 enriched 的涨跌停信号将缺失、"
+                "换手率将全为 null; 请重跑一次维表同步后再重算 enriched"
+            )
     historical_shares = load_share_history(d)
 
     if new_dates_only:
