@@ -5,7 +5,9 @@
  *   {code}   纯 6 位代码, 如 000001
  *   {market} 市场前缀小写, 如 sz / sh / bj
  *   {symbol} 完整 symbol (含交易所后缀), 如 000001.SZ
- * 模板留空 = 关闭外链。
+ *   {name}   股票名称, 已做 URL 编码 (encodeURIComponent), 供问财等
+ *            按"查询词"搜索的站点使用, 如 %E5%8D%9A%E4%BA%91%E6%96%B0%E6%9D%90
+ * 模板留空 = 关闭外链。名称缺失时 {name} 替换为空串 (站点侧得到空查询)。
  */
 import { storage } from '@/lib/storage'
 
@@ -21,7 +23,7 @@ export function saveStockExternalTemplate(tpl: string): void {
   storage.stockExternalTemplate.set(tpl.trim())
 }
 
-export function buildStockExternalUrl(template: string, symbol: string): string | null {
+export function buildStockExternalUrl(template: string, symbol: string, name?: string): string | null {
   if (!template) return null
   // scheme 白名单: 只放行 http/https, 挡掉 javascript:/data: 等危险 scheme
   if (!/^https?:\/\//i.test(template.trim())) return null
@@ -33,4 +35,5 @@ export function buildStockExternalUrl(template: string, symbol: string): string 
     .replaceAll('{code}', code)
     .replaceAll('{market}', market)
     .replaceAll('{symbol}', symbol)
+    .replaceAll('{name}', name ? encodeURIComponent(name) : '')
 }

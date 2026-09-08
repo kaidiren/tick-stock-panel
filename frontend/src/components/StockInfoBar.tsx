@@ -236,7 +236,7 @@ export function StockInfoBar({
     )
   }
 
-  const extUrl = buildStockExternalUrl(loadStockExternalTemplate(), symbol)
+  const extUrl = buildStockExternalUrl(loadStockExternalTemplate(), symbol, displayName)
 
   return (
     <div className="px-2 pb-3 font-mono text-[12px] select-none space-y-1">

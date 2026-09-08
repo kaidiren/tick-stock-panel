@@ -299,7 +299,7 @@ export function SettingsSystemPanel() {
         <div className="flex items-center justify-between gap-4 py-2">
           <div className="min-w-0">
             <div className="text-sm text-foreground">详情页 URL 模板</div>
-            <div className="text-[11px] text-muted truncate">{"支持 {code} {market} {symbol} · 留空关闭外链"}</div>
+            <div className="text-[11px] text-muted truncate">{"支持 {code} {market} {symbol} {name} · name 自动 URL 编码 · 留空关闭外链"}</div>
           </div>
           <input
             value={extTpl}
