@@ -111,6 +111,37 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
     },
   }
 
+  // 分段着色: 严格以昨收 (0% 虚线) 为界 — 虚线以上主系列(整体趋势色), 以下绿色系列。
+  // category 轴相邻槽之间 ECharts 画直线, 真实价格路径也是直线: 对跨越 0% 的槽对,
+  // 把绿系列在「上方槽位」的值钳到 prevClose (即 0% 线上的交点), 绿线与真实价格
+  // 折线完全重合且精确止于 0% 线; 主系列 connectNulls=false, 不再出现红直线横穿
+  // 绿段、或绿段越过 0% 线的错位。
+  const mainData: (number | null)[] = []
+  const belowData: (number | null)[] = []
+  {
+    let belowPrev = false // 前一槽位是否处于 0% 下方
+    for (const row of data) {
+      const v = row?.close ?? null
+      if (v == null || prevClose == null) {
+        mainData.push(null)
+        belowData.push(null)
+        belowPrev = false
+        continue
+      }
+      if (v >= prevClose) {
+        mainData.push(v)
+        // 自下方上穿到本槽: 绿系列在本槽位止于 0% 线 (交点钳制), 随后离开绿段
+        belowData.push(belowPrev ? prevClose : null)
+        belowPrev = false
+      } else {
+        // 本槽在 0% 下方: 主系列断开 (null), 绿系列画真实值
+        mainData.push(null)
+        belowData.push(v)
+        belowPrev = true
+      }
+    }
+  }
+
   const markLineData: any[] = []
   if (prevClose != null) {
     markLineData.push({
@@ -366,23 +397,22 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
       {
         name: '价格',
         type: 'line',
-        data: closes,
+        data: mainData,
         smooth: false,
         symbol: 'none',
         cursor: 'crosshair',
         lineStyle: { width: 1.2, color: lineColor },
         areaStyle,
-        connectNulls: true,
+        connectNulls: false,
         markLine: markLineData.length > 0 ? { symbol: 'none', data: markLineData, animation: false, silent: true } : undefined,
         z: 2,
       },
-      // 低于昨收的段单独以绿色渲染 (线+面积): 用户约定分时图 0% 下方为绿。
-      // 仅在低于昨收的点上给值、其余置 null (connectNulls=false 保住段边界,
-      // 不与主系列连接), 叠在主系列之上 — 主系列在 0% 下方的红段被绿段遮盖。
+      // 0% 下方的段单独以绿色渲染 (线+面积): 数据见上方 mainData/belowData 分段,
+      // 交点钳制保证绿线精确止于 0% 虚线, 红绿分界与虚线严格重合。
       ...(prevClose != null ? [{
         name: '价格-弱势',
         type: 'line' as const,
-        data: closes.map((v: number | null) => (v != null && v < prevClose ? v : null)),
+        data: belowData,
         smooth: false,
         symbol: 'none',
         cursor: 'crosshair',
