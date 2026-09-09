@@ -51,6 +51,7 @@ function buildModel(sessions: MinuteKlineSession[]) {
     start: number
     session: MinuteKlineSession
     values: (number | null)[]
+    belowValues: (number | null)[]
     averages: (number | null)[]
   }[] = []
   const priceValues: number[] = []
@@ -74,23 +75,38 @@ function buildModel(sessions: MinuteKlineSession[]) {
     })
 
     const dayValues: (number | null)[] = []
+    const dayBelowValues: (number | null)[] = []
     const dayAverages: (number | null)[] = []
     // 量柱着色基准: 前一分钟 close; 当日第一根用 session 昨收。
     // 不用 row.open — stock-sdk 历史日无真实分钟 open(为 null), close-vs-open 会全偏。
     let prevRef: number | null = session.prev_close
+    let belowPrev = false // 前一槽位是否处于 0% 下方 (交点钳制用)
     for (const time of FULL_DAY_TIMES) {
       const point = rowsByTime.get(time)
       const index = categories.length
       categories.push(`${session.date} ${time}`)
       if (!point) {
         dayValues.push(null)
+        dayBelowValues.push(null)
         dayAverages.push(null)
         volumeData.push(null)
+        belowPrev = false
         continue
       }
 
       const { row, average } = point
       dayValues.push(row.close)
+      // 分段着色: 严格以昨收 (0% 虚线) 为界, 下方走独立绿色系列。跨越 0% 的
+      // 槽对, 把绿系列在「上方槽位」的值钳到 prevClose — category 轴相邻槽间
+      // 是直线且真实价格路径也是直线, 钳制后绿线与真实折线重合且精确止于 0% 线。
+      const pc = session.prev_close
+      if (pc != null && row.close < pc) {
+        dayBelowValues.push(row.close)
+        belowPrev = true
+      } else {
+        dayBelowValues.push(belowPrev && pc != null ? pc : null)
+        belowPrev = false
+      }
       dayAverages.push(average)
       volumeData.push({
         value: row.volume,
@@ -119,6 +135,7 @@ function buildModel(sessions: MinuteKlineSession[]) {
       start,
       session,
       values: dayValues,
+      belowValues: dayBelowValues,
       averages: dayAverages,
     })
 
@@ -216,22 +233,42 @@ export function EChartsMultiDayIntraday({
     const maxPrice = allPriceValues.length > 0 ? Math.max(...allPriceValues) : 1
     const padding = Math.max((maxPrice - minPrice) * 0.08, maxPrice * 0.002)
     const totalLength = model.categories.length
-    const priceSeries: any[] = model.dayRanges.map(({ start, session, values }) => {
+    const priceSeries: any[] = model.dayRanges.flatMap(({ start, session, values, belowValues }) => {
       const data = new Array(totalLength).fill(null) as (number | null)[]
       for (let index = 0; index < values.length; index++) data[start + index] = values[index]
+      const below = new Array(totalLength).fill(null) as (number | null)[]
+      if (session.prev_close != null) {
+        for (let index = 0; index < belowValues.length; index++) below[start + index] = belowValues[index]
+      }
       const last = session.rows[session.rows.length - 1]
       const color = last ? priceColor(last.close, session.prev_close) : COLORS.flat
-      return {
+      // 主系列 connectNulls=false: 跌破 0% 的槽位由下方绿色系列接管, 红线不横穿绿段
+      const main = {
         name: session.date,
         type: 'line',
         data,
         symbol: 'none',
         smooth: false,
-        connectNulls: true,
+        connectNulls: false,
         lineStyle: { width: 1.2, color },
         areaStyle: { color, opacity: 0.08 },
         emphasis: { disabled: true },
       }
+      if (session.prev_close == null) return [main]
+      // 0% 下方的段: 绿色线+面积, 与主系列在 0% 虚线上的交点精确相接
+      const weak = {
+        name: `${session.date}-弱势`,
+        type: 'line',
+        data: below,
+        symbol: 'none',
+        smooth: false,
+        connectNulls: false,
+        lineStyle: { width: 1.2, color: COLORS.down },
+        areaStyle: { color: COLORS.down, opacity: 0.08 },
+        emphasis: { disabled: true },
+        z: 3,
+      }
+      return [main, weak]
     })
 
     const boundaryData = model.dayStartIndexes.slice(1).map(index => ({
