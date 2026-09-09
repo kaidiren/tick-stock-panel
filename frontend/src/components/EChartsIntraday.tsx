@@ -374,7 +374,32 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         areaStyle,
         connectNulls: true,
         markLine: markLineData.length > 0 ? { symbol: 'none', data: markLineData, animation: false, silent: true } : undefined,
+        z: 2,
       },
+      // 低于昨收的段单独以绿色渲染 (线+面积): 用户约定分时图 0% 下方为绿。
+      // 仅在低于昨收的点上给值、其余置 null (connectNulls=false 保住段边界,
+      // 不与主系列连接), 叠在主系列之上 — 主系列在 0% 下方的红段被绿段遮盖。
+      ...(prevClose != null ? [{
+        name: '价格-弱势',
+        type: 'line' as const,
+        data: closes.map((v: number | null) => (v != null && v < prevClose ? v : null)),
+        smooth: false,
+        symbol: 'none',
+        cursor: 'crosshair',
+        lineStyle: { width: 1.2, color: '#2D9B65' },
+        areaStyle: {
+          color: {
+            type: 'linear',
+            x: 0, y: 0, x2: 0, y2: 1,
+            colorStops: [
+              { offset: 0, color: 'rgba(34,197,94,0.40)' },
+              { offset: 1, color: 'rgba(0,0,0,0)' },
+            ],
+          },
+        } as any,
+        connectNulls: false,
+        z: 3,
+      }] : []),
       ...(showAvgLine ? [{
         name: '均价',
         type: 'line' as const,
