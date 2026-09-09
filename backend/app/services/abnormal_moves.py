@@ -292,6 +292,17 @@ def build_intraday(repo: Any, limit: int = 500) -> dict[str, Any]:
         return empty
     counts = {k: int(hits[c].fill_null(False).sum()) for c, k in present}
 
+    # 振幅即时派生: amplitude 是运行时计算列 (不落盘), 内存行若来自盘中增量
+    # 合并可能缺列或缺值 — 有 high/low/prev_close 就地补算, 保证振幅列不空。
+    if "amplitude" not in hits.columns or hits["amplitude"].null_count() > 0:
+        if all(c in hits.columns for c in ("high", "low", "prev_close")):
+            hits = hits.with_columns(
+                pl.when(pl.col("prev_close") > 0)
+                .then((pl.col("high") - pl.col("low")) / pl.col("prev_close") * 100)
+                .otherwise(None)
+                .alias("amplitude")
+            )
+
     sig_cols = {k: hits[c].fill_null(False).to_list() for c, k in present}
     base_cols = [c for c in _INTRADAY_COLS if c in hits.columns]
     base = hits.select(base_cols).to_dicts()

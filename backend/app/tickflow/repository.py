@@ -2302,6 +2302,17 @@ class KlineRepository:
         cache_df = self._with_instrument_metadata(asset_type, df)
         merged_cache = cache_df
         if existing_cache is not None and not existing_cache.is_empty():
+            # 行级合并的列级补全: 增量帧只算量价快照列, unique(keep="last") 行覆盖
+            # 会把旧行的 turnover_rate/prev_close 等 (增量帧没有的列) 变 null
+            # (实测换手率在每次盘中增量后变 "–")。合并前把增量帧缺失的列从
+            # 旧行按 symbol 补齐, 再做行级覆盖 — 新值生效、存量列保留。
+            inherit = [c for c in existing_cache.columns if c not in cache_df.columns and c != "date"]
+            if inherit:
+                fill = (
+                    existing_cache.select(["symbol", *inherit])
+                    .unique(subset=["symbol"], keep="last")
+                )
+                cache_df = cache_df.join(fill, on="symbol", how="left", coalesce=True)
             merged_cache = pl.concat([existing_cache, cache_df], how="diagonal_relaxed").unique(
                 subset=["symbol", "date"], keep="last"
             )
@@ -2314,6 +2325,24 @@ class KlineRepository:
         ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
         out = base / f"date={ds}" / "part.parquet"
         out.parent.mkdir(parents=True, exist_ok=True)
+
+        # 列级补全: 盘中增量帧只算量价快照列 (无 turnover_rate/amplitude/prev_close
+        # 等 — 它们依赖 instruments/历史窗口, 增量路径不算)。下方 upsert 是整分区
+        # 替换, 直接写会把存量分区里这些列抹掉 (实测每日增量写后概念矩阵/自选/异动
+        # 的换手率与振幅全部变 "–")。写前从现有分区按 symbol 补齐增量帧缺失的列。
+        if out.exists() and not df_storage.is_empty():
+            try:
+                existing = pl.read_parquet(out)
+                missing = [c for c in existing.columns if c not in df_storage.columns and c != "date"]
+                if missing:
+                    fill = existing.select(["symbol", *missing]).unique(subset=["symbol"])
+                    df_storage = (
+                        df_storage.join(fill, on="symbol", how="left", coalesce=True)
+                        .select(existing.columns)
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("enriched merge 列补全失败, 按增量帧原样写入: %s", e)
+
         publication = (
             EnrichedPublication(self.store.data_dir, asset_type, recover=True)
             if asset_type in {"stock", "etf"}
