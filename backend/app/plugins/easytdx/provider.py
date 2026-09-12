@@ -10,7 +10,8 @@
   - adj_factor -> normalize_adj_factors (symbol/trade_date/ex_factor)
   - minute -> [symbol, datetime(北京墙钟 naive), open, high, low, close, volume, amount]
   - realtime -> list[dict] record (last_price/prev_close/open/high/low/volume/amount/change_pct/timestamp)
-  - depth5 -> {appSymbol: {ask_volumes, bid_volumes, timestamp}} (depth_service sealed 契约)
+  - depth5 -> {appSymbol: {ask_volumes, bid_volumes, timestamp}} (depth_service sealed 契约,
+              MAC 协议取买一/卖一价量; 标准协议报价命令自 2026-09-10 起对所有服务器返回空)
   - full_minute -> get_intraday_batch 当日窗口批量分钟 (与 minute 同形)
 
 合规提示: 通达信协议直连第三方行情服务器, 未经正式授权, 存在行情版权与反爬风险。
@@ -61,7 +62,7 @@ _MINUTE_CANONICAL = ["symbol", "datetime", "open", "high", "low", "close", "volu
 # 全市场标的列表分页大小(通达信每页上限)
 _LIST_PAGE = 1000
 
-# 单次桥接的符号批大小(标准协议批量报价上限 80)
+# 单次请求的符号批大小(标准协议批量报价上限 80; depth5 的 MAC 报价复用同一分批)
 _QUOTE_BATCH = 80
 
 # 日K单页条数上限(easy-tdx get_security_bars count>800 返回空)与深度上限
@@ -436,30 +437,37 @@ class EasyTdxProvider:
 
     # ---- depth5 (五档盘口) ----
     def get_depth_batch(self, symbols: list[str]) -> dict:
-        """按标的批量拉五档, 转成 get_depth_batch 插件契约。
+        """按标的批量拉盘口, 转成 get_depth_batch 插件契约。
 
-        标准协议 get_security_quotes 返回 bid1/bid_vol1...bid5/ask1/ask_vol1...ask5,
-        数量单位为手; 拆成 bid_prices/bid_volumes/ask_prices/ask_volumes 数组,
-        供 depth_service 取 volumes[0] 判断真假封。
+        走 MAC 协议(get_stock_quotes)而非标准协议 get_security_quotes: 标准协议
+        报价命令自 2026-09-10 起对全部 52 台已知行情服务器返回空响应(同端口同连接
+        的 MAC 命令正常), 该路径下五档恒为空。
+
+        档位: MAC 字段位图只覆盖 0x00-0x7F(买一/卖一价量), 五档量字段 0x86-0x8B
+        超出 16 字节位图(build_bitmap 直接 OverflowError), 故数组只填第一档 —
+        depth_service 的真封判定只读 volumes[0], 语义不受影响。
+        数量单位为手, 与 depth5 契约一致(已与 stock-sdk 的东财盘口逐位对账)。
         """
         if not symbols:
             return {}
+        from easy_tdx.codec.bitmap import PresetField
+
         try:
-            with self._open_client() as c:
+            with self._open_mac() as mac:
                 out: dict[str, dict | None] = {}
                 for i in range(0, len(symbols), _QUOTE_BATCH):
                     chunk = symbols[i:i + _QUOTE_BATCH]
                     pairs = [(_market_of_symbol(s), _code_of_symbol(s)) for s in chunk]
-                    df = c.get_security_quotes(pairs)
+                    df = mac.get_stock_quotes(pairs, fields=PresetField.QUOTE)
                     if df is None or len(df) == 0:
                         continue
                     for _, row in df.iterrows():
                         sym = _to_app_symbol(str(row["code"]), int(row["market"]))
                         out[sym] = {
-                            "bid_prices": [row.get(f"bid{j}") for j in range(1, 6)],
-                            "bid_volumes": [float(row.get(f"bid_vol{j}", 0) or 0) for j in range(1, 6)],
-                            "ask_prices": [row.get(f"ask{j}") for j in range(1, 6)],
-                            "ask_volumes": [float(row.get(f"ask_vol{j}", 0) or 0) for j in range(1, 6)],
+                            "bid_prices": [row.get("bid_price")],
+                            "bid_volumes": [float(row.get("bid_volume") or 0)],
+                            "ask_prices": [row.get("ask_price")],
+                            "ask_volumes": [float(row.get("ask_volume") or 0)],
                             "timestamp": None,
                         }
                 return out

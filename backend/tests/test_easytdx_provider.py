@@ -125,29 +125,66 @@ def test_get_minute_accepts_tz_aware_window(monkeypatch):
 
 # ---------- depth5 归一化 ----------
 
-def test_get_depth_batch_maps_bid_ask(monkeypatch):
-    """标准协议 get_security_quotes 的 bid/ask 五档 → prices/volumes 数组契约。"""
+def test_get_depth_batch_uses_mac_level1(monkeypatch):
+    """MAC get_stock_quotes 的买一/卖一价量 → prices/volumes 数组契约。
+
+    五档改走 MAC 一档(标准协议报价命令恒空); 数量单位为手, 且涨停卖一 0 /
+    跌停买一 0 必须原样透传 — depth_service 靠 volumes[0]==0 判真封。
+    """
     p = EasyTdxProvider()
+    seen: dict = {}
 
     class FakeClient:
-        def get_security_quotes(self, pairs):
+        def get_stock_quotes(self, pairs, fields=None):
             import pandas as pd
-            return pd.DataFrame([{
-                "market": 1, "code": "600519", "name": "贵州茅台",
-                "bid1": 1297.5, "bid_vol1": 7, "bid2": 1297.4, "bid_vol2": 8,
-                "bid3": 1297.37, "bid_vol3": 1, "bid4": 1297.33, "bid_vol4": 1,
-                "bid5": 1297.2, "bid_vol5": 1,
-                "ask1": 1297.54, "ask_vol1": 3, "ask2": 1297.55, "ask_vol2": 2,
-                "ask3": 1297.6, "ask_vol3": 1, "ask4": 1297.61, "ask_vol4": 1,
-                "ask5": 1297.66, "ask_vol5": 2,
-            }])
+            seen["pairs"] = pairs
+            seen["fields"] = fields
+            return pd.DataFrame([
+                {"market": 0, "code": "002161", "name": "远望谷",
+                 "bid_price": 8.04, "ask_price": 0.0,
+                 "bid_volume": 338507, "ask_volume": 0},
+                {"market": 1, "code": "600519", "name": "贵州茅台",
+                 "bid_price": 1275.16, "ask_price": 1276.0,
+                 "bid_volume": 9, "ask_volume": 14},
+            ])
 
-    monkeypatch.setattr(p, "_open_client", lambda: _ctx(FakeClient()))
-    out = p.get_depth_batch(["600519.SH"])
-    assert out["600519.SH"]["bid_prices"] == [1297.5, 1297.4, 1297.37, 1297.33, 1297.2]
-    assert out["600519.SH"]["bid_volumes"] == [7.0, 8.0, 1.0, 1.0, 1.0]
-    assert out["600519.SH"]["ask_prices"] == [1297.54, 1297.55, 1297.6, 1297.61, 1297.66]
-    assert out["600519.SH"]["ask_volumes"] == [3.0, 2.0, 1.0, 1.0, 2.0]
+    monkeypatch.setattr(p, "_open_mac", lambda: _ctx(FakeClient()))
+    out = p.get_depth_batch(["002161.SZ", "600519.SH"])
+
+    from easy_tdx.codec.bitmap import PresetField
+    assert seen["pairs"] == [(0, "002161"), (1, "600519")]
+    assert seen["fields"] == PresetField.QUOTE
+    # 涨停真封: 卖一量 0 透传, 封单量为买一量
+    assert out["002161.SZ"]["ask_volumes"] == [0.0]
+    assert out["002161.SZ"]["bid_volumes"] == [338507.0]
+    assert out["002161.SZ"]["ask_prices"] == [0.0]
+    assert out["002161.SZ"]["bid_prices"] == [8.04]
+    assert out["002161.SZ"]["timestamp"] is None
+    # 普通盘口
+    assert out["600519.SH"]["bid_volumes"] == [9.0]
+    assert out["600519.SH"]["ask_volumes"] == [14.0]
+    assert set(out) == {"002161.SZ", "600519.SH"}
+
+
+def test_get_depth_batch_chunks_batches(monkeypatch):
+    """超过单批上限(80)按批请求并合并结果。"""
+    p = EasyTdxProvider()
+    calls: list[int] = []
+
+    class FakeClient:
+        def get_stock_quotes(self, pairs, fields=None):
+            import pandas as pd
+            calls.append(len(pairs))
+            return pd.DataFrame([
+                {"market": mkt, "code": code, "name": "x",
+                 "bid_price": 1.0, "ask_price": 1.01, "bid_volume": 1, "ask_volume": 2}
+                for mkt, code in pairs
+            ])
+
+    monkeypatch.setattr(p, "_open_mac", lambda: _ctx(FakeClient()))
+    out = p.get_depth_batch([f"{600000 + i}.SH" for i in range(81)])
+    assert calls == [80, 1]
+    assert len(out) == 81
 
 
 def test_get_depth_batch_empty_symbols(monkeypatch):
@@ -157,7 +194,20 @@ def test_get_depth_batch_empty_symbols(monkeypatch):
 
 def test_get_depth_batch_exception_degrades_to_empty(monkeypatch):
     p = EasyTdxProvider()
-    monkeypatch.setattr(p, "_open_client", lambda: _ctx(_Thrower("boom")))
+    monkeypatch.setattr(p, "_open_mac", lambda: _ctx(_Thrower("boom")))
+    assert p.get_depth_batch(["600519.SH"]) == {}
+
+
+def test_get_depth_batch_empty_response(monkeypatch):
+    """MAC 返回空表(非交易时段服务器回空)时返回空 dict, 不伪造盘口。"""
+    p = EasyTdxProvider()
+
+    class FakeClient:
+        def get_stock_quotes(self, pairs, fields=None):
+            import pandas as pd
+            return pd.DataFrame()
+
+    monkeypatch.setattr(p, "_open_mac", lambda: _ctx(FakeClient()))
     assert p.get_depth_batch(["600519.SH"]) == {}
 
 
