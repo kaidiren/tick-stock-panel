@@ -14,6 +14,11 @@ const THEME = {
   avgLine: '#F59E0B',
   volUp: 'rgba(240,68,56,0.6)',
   volDown: 'rgba(18,183,106,0.6)',
+  // 0 轴分段着色: 昨收(0.00%)以上红、以下绿
+  bull: '#C74040',
+  bullFill: 'rgba(199,64,64,0.40)',
+  bear: '#2D9B65',
+  bearFill: 'rgba(34,197,94,0.40)',
 }
 
 interface Props {
@@ -416,13 +421,13 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         smooth: false,
         symbol: 'none',
         cursor: 'crosshair',
-        lineStyle: { width: 1.2, color: '#2D9B65' },
+        lineStyle: { width: 1.2, color: THEME.bear },
         areaStyle: {
           color: {
             type: 'linear',
             x: 0, y: 0, x2: 0, y2: 1,
             colorStops: [
-              { offset: 0, color: 'rgba(34,197,94,0.40)' },
+              { offset: 0, color: THEME.bearFill },
               { offset: 1, color: 'rgba(0,0,0,0)' },
             ],
           },
@@ -486,12 +491,11 @@ export function EChartsIntraday({
   const ct = useChartTheme()
   const avgPrices = useMemo(() => computeIntradayAverage(data), [data])
 
-  // 分时线颜色：基于最新价 vs 昨收
-  const lastClose = data.length > 0 ? data[data.length - 1].close : null
-  const lineIsUp = lastClose != null && prevClose != null ? lastClose > prevClose : true
-  const lineIsFlat = lastClose != null && prevClose != null ? lastClose === prevClose : false
-  const lineColor = lineIsFlat ? '#A1A1AA' : lineIsUp ? '#C74040' : '#2D9B65'
-  const areaFill = lineIsFlat ? 'rgba(180,180,190,0.40)' : lineIsUp ? 'rgba(199,64,64,0.40)' : 'rgba(34,197,94,0.40)'
+  // 分时线颜色：按 0 轴(昨收)分段固定着色 — 主系列(≥ 昨收, 0% 线以上)恒红,
+  // 下方系列(跌破昨收)恒绿。不再按"最新价 vs 昨收"整日切换, 否则当日收跌时
+  // 0% 线上方的段会被整条画成绿色, 与"以 0 轴分色"的读图习惯相悖。
+  const lineColor = THEME.bull
+  const areaFill = THEME.bullFill
 
   useEffect(() => {
     setInfoIdx(data.length - 1)

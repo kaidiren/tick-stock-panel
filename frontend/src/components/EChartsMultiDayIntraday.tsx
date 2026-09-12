@@ -240,8 +240,9 @@ export function EChartsMultiDayIntraday({
       if (session.prev_close != null) {
         for (let index = 0; index < belowValues.length; index++) below[start + index] = belowValues[index]
       }
-      const last = session.rows[session.rows.length - 1]
-      const color = last ? priceColor(last.close, session.prev_close) : COLORS.flat
+      // 主系列固定红色 (0 轴以上), 不随当日收盘涨跌整段切换颜色 — 与下方绿色
+      // 弱势段一起构成"0% 线上红 / 线下绿"的分段着色。
+      const color = COLORS.up
       // 主系列 connectNulls=false: 跌破 0% 的槽位由下方绿色系列接管, 红线不横穿绿段
       const main = {
         name: session.date,
